@@ -1,0 +1,20 @@
+@import url('https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Almarai", ui-sans-serif, system-ui, sans-serif;
+  --color-primary: #1d315e;
+}
+
+body {
+  direction: rtl;
+  @apply bg-slate-50 text-slate-900 selection:bg-indigo-100 selection:text-indigo-900;
+}
+
+.sold-gradient {
+  background: #1d315e;
+}
+
+.available-shadow {
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+}
