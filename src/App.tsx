@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Building2, 
@@ -23,91 +23,15 @@ import {
   UserPlus
 } from 'lucide-react';
 import { Unit, UnitStatus, Block, User, UserRole } from './types';
-import { INITIAL_DATA } from './data';
+import { legacyBlocksFromMapData } from './utils/legacyBlocksFromMap';
+import { MapCanvas } from './components/map/MapCanvas';
+import { useMapStore } from './store/mapStore';
 
 interface CategoryConfig {
   basePrice: number;
   baseArea: number;
   cornerPremium: number;
   cornerAreaBonus: number;
-}
-
-interface MapBlockProps {
-  block: Block;
-  onHover: (id: string | null) => void;
-  onClick: (unit: Unit) => void;
-  rotation?: number;
-}
-
-const MapBlock: React.FC<MapBlockProps> = ({ 
-  block, 
-  onHover, 
-  onClick, 
-  rotation = 0 
-}) => {
-  const { layout } = block;
-  const soldCount = block.units.filter(u => u.status === UnitStatus.SOLD).length;
-
-  return (
-    <motion.div 
-      onMouseEnter={() => onHover(block.id)}
-      onMouseLeave={() => onHover(null)}
-      style={{ 
-        left: `${layout.x}%`, 
-        top: `${layout.y}%`, 
-        width: `${layout.w}%`, 
-        height: `${layout.h}%`,
-        transform: `rotate(${rotation}deg)`
-      }}
-      className={`
-        absolute border-[3px] rounded-xl transition-all flex flex-col shadow-sm group
-        ${soldCount / block.units.length > 0.8 ? 'border-primary/30 bg-primary/10' : 'border-slate-200/60 bg-white/80'}
-        hover:border-primary hover:shadow-2xl hover:z-30 hover:scale-[1.05] hover:bg-white
-      `}
-    >
-      <div className="flex-1 overflow-hidden p-1.5 flex flex-col">
-        <div className="flex items-center justify-between px-2 mb-1">
-          <span className="font-black text-lg text-slate-800 tracking-tighter">{block.id}</span>
-          <div className="flex items-center gap-1">
-             <div className="w-1.5 h-1.5 rounded-full bg-primary" />
-             <span className="text-[8px] font-black text-slate-400">{soldCount}/{block.units.length}</span>
-          </div>
-        </div>
-        
-        <div 
-          className="grid gap-0.5 flex-1"
-          style={{ 
-            gridTemplateColumns: `repeat(${layout.cols}, 1fr)`,
-            gridTemplateRows: `repeat(${layout.rows}, 1fr)`,
-            direction: 'ltr'
-          }}
-        >
-          {block.units.map(unit => (
-            <div 
-              key={unit.id}
-              onClick={(e) => { e.stopPropagation(); onClick(unit); }}
-              className={`
-                flex items-center justify-center rounded-sm text-[6px] font-black border border-black/5 transition-all cursor-pointer h-full
-                ${unit.status === UnitStatus.SOLD ? 'bg-primary text-white shadow-sm' : 
-                  unit.status === UnitStatus.RESERVED ? 'bg-amber-500 text-white shadow-sm' :
-                  'bg-white text-slate-300 hover:bg-primary/10 hover:text-primary'}
-              `}
-            >
-              {layout.cols * layout.rows > 60 ? null : unit.number}
-            </div>
-          ))}
-        </div>
-      </div>
-      
-      <div className="bg-slate-900/5 h-1 w-full overflow-hidden">
-        <motion.div 
-          initial={{ width: 0 }}
-          animate={{ width: `${(soldCount / block.units.length) * 100}%` }}
-          className="h-full bg-primary"
-        />
-      </div>
-    </motion.div>
-  );
 }
 
 const DEFAULT_CONFIGS: Record<'A' | 'B' | 'C', CategoryConfig> = {
@@ -117,7 +41,6 @@ const DEFAULT_CONFIGS: Record<'A' | 'B' | 'C', CategoryConfig> = {
 };
 
 export default function App() {
-  const [data, setData] = useState<Block[]>(INITIAL_DATA);
   const [configs, setConfigs] = useState(DEFAULT_CONFIGS);
   const [searchTerm, setSearchTerm] = useState('');
   const [filter, setFilter] = useState<'all' | UnitStatus>('all');
@@ -137,15 +60,7 @@ export default function App() {
   const [isEditingCollection, setIsEditingCollection] = useState(false);
   const [tempCollection, setTempCollection] = useState<string>('');
 
-  const soldUnits = useMemo(() => {
-    return data.flatMap(b => b.units.filter(u => u.status === UnitStatus.SOLD));
-  }, [data]);
-
-  const recentSoldUnits = useMemo(() => {
-    return [...soldUnits].slice(0, 10);
-  }, [soldUnits]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [bookingName, setBookingName] = useState('');
   const [bookingNote, setBookingNote] = useState('');
@@ -153,6 +68,20 @@ export default function App() {
   const [tempPrice, setTempPrice] = useState<number | string>('');
   const [editingUnitIdInTable, setEditingUnitIdInTable] = useState<string | null>(null);
   const [tempPriceInTable, setTempPriceInTable] = useState<number | string>('');
+  const selectedPlotIdOnMap = useMapStore((s) => s.selectedPlotId);
+  const hoveredPlotIdOnMap = useMapStore((s) => s.hoveredPlotId);
+  const mapData = useMapStore((s) => s.map);
+  const updateMapPlot = useMapStore((s) => s.updatePlot);
+
+  const data = useMemo(() => legacyBlocksFromMapData(mapData), [mapData]);
+
+  const soldUnits = useMemo(() => {
+    return data.flatMap(b => b.units.filter(u => u.status === UnitStatus.SOLD));
+  }, [data]);
+
+  const recentSoldUnits = useMemo(() => {
+    return [...soldUnits].slice(0, 10);
+  }, [soldUnits]);
 
   const stats = useMemo(() => {
     let total = 0, sold = 0, reserved = 0;
@@ -170,26 +99,27 @@ export default function App() {
   }, [data]);
 
   const updateUnitPrice = (unitId: string, newPrice: number) => {
-    setData(prev => prev.map(block => ({
-      ...block,
-      units: block.units.map(u => u.id === unitId ? { ...u, price: newPrice } : u)
-    })));
+    updateMapPlot(unitId, { meta: { ...(mapData.plots.find((p) => p.id === unitId)?.meta ?? {}), price: newPrice } });
   };
 
   const handleBooking = (unitId: string, status: UnitStatus, name?: string, note?: string, durationHours?: number) => {
-    setData(prev => prev.map(block => ({
-      ...block,
-      units: block.units.map(u => u.id === unitId ? { 
-        ...u, 
-        status, 
-        customerName: status !== UnitStatus.AVAILABLE ? name : undefined,
-        note: status !== UnitStatus.AVAILABLE ? note : undefined,
-        reservedAt: status === UnitStatus.RESERVED ? new Date().toISOString() : undefined,
-        reservedUntil: (status === UnitStatus.RESERVED && durationHours) 
-          ? new Date(Date.now() + durationHours * 60 * 60 * 1000).toISOString() 
-          : undefined
-      } : u)
-    })));
+    const reservedUntilIso =
+      (status === UnitStatus.RESERVED && durationHours)
+        ? new Date(Date.now() + durationHours * 60 * 60 * 1000).toISOString()
+        : undefined;
+    const plot = mapData.plots.find((p) => p.id === unitId);
+    if (plot) {
+      updateMapPlot(unitId, {
+        status: status as any,
+        meta: {
+          ...(plot.meta ?? {}),
+          customerName: status !== UnitStatus.AVAILABLE ? name : undefined,
+          note: status !== UnitStatus.AVAILABLE ? note : undefined,
+          reservedAt: status === UnitStatus.RESERVED ? new Date().toISOString() : undefined,
+          reservedUntil: reservedUntilIso,
+        },
+      });
+    }
 
     // Reset fields
     setBookingName('');
@@ -201,6 +131,24 @@ export default function App() {
     setTempPrice(unit.price || 0);
     setIsEditingPrice(false);
   };
+
+  const unitById = useMemo(() => {
+    const m = new Map<string, Unit>();
+    for (const b of data) for (const u of b.units) m.set(u.id, u);
+    return m;
+  }, [data]);
+
+  const mapFocusedUnit = useMemo(() => {
+    const id = hoveredPlotIdOnMap || selectedPlotIdOnMap;
+    if (!id) return null;
+    return unitById.get(id) || null;
+  }, [hoveredPlotIdOnMap, selectedPlotIdOnMap, unitById]);
+
+  useEffect(() => {
+    if (!selectedPlotIdOnMap) return;
+    const u = unitById.get(selectedPlotIdOnMap);
+    if (u) openUnitModal(u);
+  }, [selectedPlotIdOnMap, unitById]);
 
   const filteredData = useMemo(() => {
     return data.map(block => ({
@@ -214,21 +162,26 @@ export default function App() {
   }, [data, searchTerm, filter]);
 
   const updateAllPrices = (newConfigs: typeof configs) => {
-    setData(prev => prev.map(block => ({
-      ...block,
-      units: block.units.map(unit => {
-        const cat = unit.category as 'A' | 'B' | 'C';
-        if (!cat || !newConfigs[cat]) return unit;
-        
-        const cfg = newConfigs[cat];
-        const isCorner = unit.unitType === 'ركن';
-        return {
-          ...unit,
-          price: isCorner ? cfg.basePrice * (1 + cfg.cornerPremium / 100) : cfg.basePrice,
-          area: isCorner ? cfg.baseArea + cfg.cornerAreaBonus : cfg.baseArea
-        };
-      })
-    })));
+    useMapStore.setState((s) => ({
+      map: {
+        ...s.map,
+        plots: s.map.plots.map((plot) => {
+          const meta = (plot.meta ?? {}) as Record<string, unknown>;
+          const cat = meta.category as 'A' | 'B' | 'C' | undefined;
+          if (!cat || !newConfigs[cat]) return plot;
+          const cfg = newConfigs[cat];
+          const isCorner = meta.unitType === 'ركن';
+          return {
+            ...plot,
+            meta: {
+              ...meta,
+              price: isCorner ? cfg.basePrice * (1 + cfg.cornerPremium / 100) : cfg.basePrice,
+              area: isCorner ? cfg.baseArea + cfg.cornerAreaBonus : cfg.baseArea,
+            },
+          };
+        }),
+      },
+    }));
   };
 
   const handleAddUser = () => {
@@ -251,7 +204,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen flex bg-slate-100 font-sans text-slate-800 selection:bg-primary/20 selection:text-primary overflow-hidden" dir="rtl">
+    <div className={`min-h-screen flex bg-slate-100 font-sans text-slate-800 selection:bg-primary/20 selection:text-primary ${view === 'map' ? 'overflow-visible' : 'overflow-hidden'}`} dir="rtl">
       {/* Role Switcher (For Demo Only) */}
       <div className="fixed bottom-4 left-4 z-[9999] flex gap-2">
         <button 
@@ -306,7 +259,7 @@ export default function App() {
       </AnimatePresence>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col h-screen overflow-hidden relative">
+      <main className={`flex-1 flex flex-col h-screen relative ${view === 'map' ? 'overflow-visible min-h-0' : 'overflow-hidden'}`}>
         {!isFullscreen && (
           <button 
             onClick={() => setIsSidebarOpen(!isSidebarOpen)}
@@ -334,7 +287,7 @@ export default function App() {
         </header>
         )}
 
-        <div className="flex-1 overflow-hidden relative">
+        <div className={`flex-1 relative min-h-0 ${view === 'map' ? 'overflow-visible' : 'overflow-hidden'}`}>
           <AnimatePresence mode="wait">
             {view === 'dashboard' ? (
               <motion.div key="dashboard" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="h-full overflow-y-auto p-8 space-y-8">
@@ -790,12 +743,12 @@ export default function App() {
                 </div>
               </motion.div>
             ) : (
-              <motion.div key="map" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className={`h-full flex flex-col md:flex-row overflow-hidden ${isFullscreen ? 'p-0 gap-0' : 'p-6 gap-6'}`}>
-                <div className={`flex-1 bg-white ${isFullscreen ? 'rounded-0' : 'rounded-[40px] border border-slate-200 shadow-2xl'} overflow-hidden relative flex flex-col`}>
+              <motion.div key="map" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className={`h-full flex flex-col md:flex-row overflow-visible min-h-0 min-w-0 ${isFullscreen ? 'p-0 gap-0' : 'p-6 gap-6'}`}>
+                <div className={`flex-1 min-w-0 bg-white ${isFullscreen ? 'rounded-0' : 'rounded-[40px] border border-slate-200 shadow-2xl'} overflow-visible relative flex flex-col min-h-0`}>
                   <div className={`p-6 border-b border-slate-100 flex justify-between items-center bg-white/80 backdrop-blur-md z-10 ${isFullscreen ? 'sticky top-0' : ''}`}>
                     <div>
                       <h3 className="font-black text-slate-800 text-lg">مخطط الزون الأول</h3>
-                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">SHATT AL-ARAB RESIDENTIAL CITY</p>
+                      <p className="text-[10px] font-bold text-slate-400 tracking-widest">مدينة شط العرب السكنية</p>
                     </div>
                     <div className="flex gap-4 items-center">
                       <button 
@@ -805,57 +758,10 @@ export default function App() {
                         {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
                         <span>{isFullscreen ? 'تصغير' : 'ملء الشاشة'}</span>
                       </button>
-                      <LegendItem color="bg-primary" label="مباع" />
-                      <LegendItem color="bg-amber-500" label="حجز مبدئي" />
-                      <LegendItem color="bg-white border-slate-200" label="متاح" />
                     </div>
                   </div>
-                  <div className="flex-1 overflow-auto bg-slate-50 p-12 cursor-grab active:cursor-grabbing">
-                    <div className="relative w-[1800px] h-[1200px] bg-white rounded-[60px] shadow-inner border border-slate-100 p-20 overflow-hidden">
-                      {/* Grid Background */}
-                      <div className="absolute inset-0 opacity-[0.03] pointer-events-none" style={{ backgroundImage: 'radial-gradient(#000 1px, transparent 1px)', backgroundSize: '40px 40px' }} />
-
-                      {/* Streets */}
-                      <Street label="50 M WIDE ROAD" className="top-0 left-0 right-0 h-10 bg-slate-100/50" />
-                      <Street label="ST-10" className="left-[14%] top-0 bottom-0 w-6" vertical />
-                      <Street label="ST-11" className="right-[10%] top-0 bottom-0 w-6" vertical />
-                      <Street label="ST-18" className="right-[4%] top-0 bottom-0 w-6" vertical />
-
-                      {/* Landmarks */}
-                      <div className="absolute left-[34%] top-[20%] w-[18%] h-[20%] bg-slate-50 border-2 border-dashed border-slate-200 rounded-[40px] flex flex-col items-center justify-center p-8 text-slate-300">
-                        <span className="font-black text-xl uppercase tracking-widest opacity-20 text-center leading-tight">SCHOOL COMPLEX<br/>11,000 M²</span>
-                      </div>
-
-                      <div className="absolute left-[45%] top-[12%] w-[10%] h-[10%] bg-slate-50 border-2 border-dashed border-slate-200 rounded-[30px] flex flex-col items-center justify-center p-4 text-slate-300">
-                        <span className="font-black text-[10px] uppercase tracking-widest opacity-20 text-center leading-tight">Local Market<br/>2,700 M²</span>
-                      </div>
-
-                      <div className="absolute left-[58%] top-[15%] w-[5%] h-[5%] bg-slate-100 border border-slate-200 rounded-xl flex items-center justify-center text-[8px] font-bold text-slate-400 text-center leading-tight">
-                        Lifting Station
-                      </div>
-
-                      {/* Power/Service Icons */}
-                      <div className="absolute left-[10%] top-[5%] w-[10%] h-[10%] bg-amber-50 border border-amber-200 rounded-2xl flex flex-col items-center justify-center p-4 text-amber-900/40 font-black text-center leading-[0.8] tracking-tighter">
-                        <Building2 size={24} className="mb-2 opacity-30" />
-                        <span className="text-[10px]">PUBLIC SERVICE BUILDING<br/>1370 M²</span>
-                      </div>
-
-                      <div className="absolute right-[12%] top-[65%] w-[10%] h-[10%] bg-amber-50 border border-amber-200 rounded-2xl flex flex-col items-center justify-center p-4 text-amber-900/40 font-black text-center leading-[0.8] tracking-tighter">
-                        <Building2 size={24} className="mb-2 opacity-30" />
-                        <span className="text-[10px]">PUBLIC SERVICE BUILDING</span>
-                      </div>
-
-                      {/* Dynamic Blocks */}
-                      {data.map(block => (
-                        <MapBlock 
-                          key={block.id} 
-                          block={block} 
-                          onHover={(id: string | null) => setActiveBlockId(id)} 
-                          onClick={(unit: Unit) => openUnitModal(unit)} 
-                          rotation={['A1', 'A2', 'A3', 'A4', 'B1'].includes(block.id) ? -15 : 0}
-                        />
-                      ))}
-                    </div>
+                  <div className="flex-1 min-h-0 min-w-0 relative bg-slate-50">
+                    <MapCanvas />
                   </div>
                 </div>
                 {!isFullscreen && (
@@ -865,33 +771,35 @@ export default function App() {
                       <Info className="text-primary" size={18} />
                       <span className="font-black text-sm">تفاصيل المنطقة</span>
                     </div>
-                    {activeBlockId ? (
-                      <div className="space-y-4">
-                        <div className="p-4 bg-primary/10 rounded-2xl border border-primary/20">
-                          <h4 className="text-2xl font-black text-primary leading-none">{activeBlockId}</h4>
-                          <p className="text-[10px] font-bold text-primary mt-1 uppercase">بلوك محدد</p>
+                    {mapFocusedUnit ? (
+                      <div className="space-y-3 text-slate-700">
+                        <div className="rounded-2xl border border-slate-100 bg-slate-50 p-3">
+                          <p className="text-[10px] font-black text-slate-400">الوحدة</p>
+                          <p className="text-xl font-black">#{mapFocusedUnit.number}</p>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
-                          <BlockStat label="إجمالي" value={data.find(b => b.id === activeBlockId)?.units.length || 0} />
-                          <BlockStat label="مباع" value={data.find(b => b.id === activeBlockId)?.units.filter(u => u.status === UnitStatus.SOLD).length || 0} color="primary" />
+                          <div className="rounded-xl border border-slate-100 p-2">
+                            <p className="text-[10px] font-black text-slate-400">البلوك</p>
+                            <p className="font-black">{mapFocusedUnit.block}</p>
+                          </div>
+                          <div className="rounded-xl border border-slate-100 p-2">
+                            <p className="text-[10px] font-black text-slate-400">المساحة</p>
+                            <p className="font-black">{mapFocusedUnit.area} م²</p>
+                          </div>
                         </div>
-                        <div className="pt-2">
-                           <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase mb-1">
-                             <span>نسبة البيع</span>
-                             <span>{Math.round(((data.find(b => b.id === activeBlockId)?.units.filter(u => u.status === UnitStatus.SOLD).length || 0) / (data.find(b => b.id === activeBlockId)?.units.length || 1)) * 100)}%</span>
-                           </div>
-                           <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
-                             <div 
-                               className="h-full bg-primary" 
-                               style={{ width: `${((data.find(b => b.id === activeBlockId)?.units.filter(u => u.status === UnitStatus.SOLD).length || 0) / (data.find(b => b.id === activeBlockId)?.units.length || 1)) * 100}%` }} 
-                             />
-                           </div>
-                        </div>
+                        <button
+                          onClick={() => openUnitModal(mapFocusedUnit)}
+                          className="w-full rounded-xl bg-primary px-4 py-2 text-xs font-black text-white hover:opacity-90"
+                        >
+                          فتح إجراءات الوحدة
+                        </button>
                       </div>
                     ) : (
-                      <div className="py-12 text-center text-slate-400">
-                        <MapIcon size={32} className="mx-auto mb-3 opacity-20" />
-                        <p className="text-xs font-bold font-sans">قم بتمرير المؤشر لرؤية بيانات البلوك</p>
+                      <div className="py-8 text-center text-slate-500 space-y-2 px-2">
+                        <MapIcon size={28} className="mx-auto opacity-25" />
+                        <p className="text-xs font-bold leading-relaxed">
+                          حرّك المؤشر فوق أي قطعة لعرض التفاصيل، أو انقر القطعة لفتح إجراءات الوحدة.
+                        </p>
                       </div>
                     )}
                   </div>
@@ -915,7 +823,7 @@ export default function App() {
                       </div>
                     </div>
                     <div className="mt-auto pt-6 border-t border-white/5">
-                      <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest text-center">Shatt Al-Arab Residential Project</p>
+                      <p className="text-[10px] font-bold text-white/30 tracking-widest text-center">مشروع شط العرب السكني</p>
                     </div>
                   </div>
                   </div>
@@ -1184,14 +1092,6 @@ function UnitBox({ unit, onClick }: any) {
       <span className="text-[8px] font-black opacity-40 uppercase tracking-tight">{unit.block}</span>
       <span className="text-sm font-black leading-none">{unit.number}</span>
     </motion.button>
-  );
-}
-
-function Street({ label, className, vertical = false }: any) {
-  return (
-    <div className={`absolute bg-slate-100/30 flex items-center justify-center pointer-events-none rounded-sm ${className}`}>
-      <span className={`${vertical ? 'rotate-90 text-[12px]' : 'text-[10px]'} font-black text-slate-300 tracking-[0.8em] uppercase overflow-hidden whitespace-nowrap px-4`}>{label}</span>
-    </div>
   );
 }
 

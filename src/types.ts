@@ -37,13 +37,50 @@ export interface Block {
   id: string;
   name: string;
   units: Unit[];
-  layout: {
-    x: number; // percentage
-    y: number; // percentage
-    w: number; // percentage
-    h: number; // percentage
-    cols: number;
-    rows: number;
-    isVertical?: boolean;
+  layout: MapBlockLayout;
+}
+
+export interface MapBlockLayout {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  cols: number;
+  rows: number;
+  rotation?: number;
+  numbering?: {
+    reverseRows?: boolean;
+    reverseCols?: boolean;
+    mode?: 'default' | 'splitColumns2' | 'a3Legacy';
   };
+}
+
+export interface RoadSegment {
+  id: string;
+  label: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  vertical?: boolean;
+}
+
+export interface Facility {
+  id: string;
+  label: string;
+  subLabel?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  type: 'school' | 'market' | 'station' | 'service' | 'utility';
+}
+
+export interface MapGeometry {
+  artboard: {
+    width: number;
+    height: number;
+  };
+  roads: RoadSegment[];
+  facilities: Facility[];
 }

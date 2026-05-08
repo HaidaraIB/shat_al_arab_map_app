@@ -3,7 +3,7 @@
 
 @theme {
   --font-sans: "Almarai", ui-sans-serif, system-ui, sans-serif;
-  --color-primary: #1d315e;
+  --color-primary: #1f4b3a;
 }
 
 body {
@@ -12,9 +12,48 @@ body {
 }
 
 .sold-gradient {
-  background: #1d315e;
+  background: #1f4b3a;
 }
 
 .available-shadow {
   box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+}
+
+/* Zoom/pan: fill parent + avoid clipping when content is rotated/translated */
+.map-zoom-root {
+  position: relative;
+  overflow: hidden;
+}
+
+.map-zoom-stage {
+  unicode-bidi: isolate;
+}
+
+.map-zoom-root .map-zoom-svg {
+  overflow: visible !important;
+}
+
+.map-zoom-root .map-zoom-inner-wrapper {
+  position: absolute !important;
+  inset: 0 !important;
+  overflow: visible !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.map-zoom-root .map-zoom-inner-content {
+  overflow: visible !important;
+  width: auto !important;
+  height: auto !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  flex-wrap: nowrap !important;
+  align-items: flex-start !important;
+  align-content: flex-start !important;
+  justify-content: flex-start !important;
+}
+
+.map-zoom-root .react-transform-wrapper {
+  width: 100% !important;
+  height: 100% !important;
 }
