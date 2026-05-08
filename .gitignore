@@ -7,3 +7,5 @@ coverage/
 .env*
 !.env.example
 map.pdf
+# Server-only; optional local test — never commit the token
+public/map-save-secret.txt

@@ -1,10 +1,13 @@
 <?php
 /**
  * Writes POST body JSON to map-default.json next to this script (same folder as index.html).
- * Deploy with your static build; set MAP_SAVE_TOKEN on the server or edit $MAP_SAVE_TOKEN below.
  *
- * Hostinger: MultiPHP → Environment variables, or replace CHANGE_ME below after upload.
- * Protect this URL (HTTP auth / IP allowlist) if the token ever appears in the frontend bundle.
+ * Token (same value as VITE_MAP_SAVE_TOKEN in your GitHub build) must exist ONLY on the server:
+ *   1) Environment variable MAP_SAVE_TOKEN (hPanel / PHP config if your host supports it), or
+ *   2) One-line file map-save-secret.txt in THIS folder (create in File Manager — do not commit to git).
+ *
+ * The SPA does NOT read .env from Hostinger; Vite bakes secrets at npm run build. This PHP file never
+ * needs the token hard-coded in GitHub.
  */
 declare(strict_types=1);
 
@@ -16,9 +19,28 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
+$expected = '';
 $fromEnv = getenv('MAP_SAVE_TOKEN');
-/** @var non-empty-string|false $expected */
-$expected = is_string($fromEnv) && $fromEnv !== '' ? $fromEnv : 'CHANGE_ME_SET_MAP_SAVE_TOKEN_ON_SERVER';
+if (is_string($fromEnv) && $fromEnv !== '') {
+    $expected = $fromEnv;
+} else {
+    $secretFile = __DIR__ . DIRECTORY_SEPARATOR . 'map-save-secret.txt';
+    if (is_readable($secretFile)) {
+        $fromFile = trim((string) file_get_contents($secretFile));
+        if ($fromFile !== '') {
+            $expected = $fromFile;
+        }
+    }
+}
+
+if ($expected === '') {
+    http_response_code(500);
+    echo json_encode([
+        'ok' => false,
+        'error' => 'Server token missing: set MAP_SAVE_TOKEN or create map-save-secret.txt next to this script.',
+    ]);
+    exit;
+}
 
 $token = $_SERVER['HTTP_X_MAP_SAVE_TOKEN'] ?? '';
 if (!hash_equals($expected, $token)) {
