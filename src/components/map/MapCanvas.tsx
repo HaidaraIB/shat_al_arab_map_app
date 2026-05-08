@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { TransformComponent, TransformWrapper, type ReactZoomPanPinchRef } from 'react-zoom-pan-pinch'
 import { useMapStore } from '../../store/mapStore'
-import type { Block, ComponentTransform, Facility, MapLabel, Plot, Road } from '../../types/map'
+import type { Block, ComponentTransform, Facility, MapData, MapLabel, Plot, Road } from '../../types/map'
 import { defaultComponentTransform } from '../../types/map'
 import { polygonBounds, polygonCentroid, pointsBoundingBox } from '../../utils/geometry'
 import { componentGroupTransform, pointsToSvgPoints, screenToSvgPoint } from '../../utils/svg'
@@ -9,7 +9,7 @@ import { mapContentSheetSize } from '../../utils/mapContentSheet'
 import { Label } from './Label'
 import { PlotPolygon } from './PlotPolygon'
 import { RoadPath } from './RoadPath'
-import { saveMapDefaultApiUrl } from '../../config/publicMap'
+import { productionSaveMapDefaultUrl, publicInitialMapUrl, saveMapDefaultApiUrl } from '../../config/publicMap'
 import { ConfirmDialog } from './ConfirmDialog'
 import { Toolbar } from './Toolbar'
 
@@ -409,25 +409,62 @@ export function MapCanvas() {
 
   const handleConfirmSaveDefaultToProject = useCallback(async () => {
     setSaveDefaultConfirmOpen(false)
-    try {
-      const json = exportMap()
-      const res = await fetch(saveMapDefaultApiUrl(), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json; charset=utf-8' },
-        body: json,
-      })
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: string } | null
-        throw new Error(body?.error ?? res.statusText)
+    const json = exportMap()
+
+    if (import.meta.env.DEV) {
+      try {
+        const res = await fetch(saveMapDefaultApiUrl(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: json,
+        })
+        if (res.ok) {
+          setToast({ kind: 'success', message: 'تم تحديث public/map-default.json على جهاز التطوير.' })
+          return
+        }
+      } catch {
+        /* ignore */
       }
-      setToast({ kind: 'success', message: 'تم حفظ القالب الافتراضي بنجاح.' })
-    } catch {
+      setToast({ kind: 'info', message: 'تعذر الحفظ عبر خادم التطوير.' })
+      return
+    }
+
+    const token = import.meta.env.VITE_MAP_SAVE_TOKEN?.trim()
+    if (!token) {
       setToast({
         kind: 'info',
-        message: 'تعذر الحفظ. جرّب أثناء تشغيل المشروع محلياً (وضع التطوير).',
+        message:
+          'لم يُضبط VITE_MAP_SAVE_TOKEN عند بناء الموقع. أضف الرمز في ملف البيئة ثم أعد البناء، واضبط MAP_SAVE_TOKEN أو القيمة في save-map-default.php على الخادم.',
+      })
+      return
+    }
+
+    try {
+      const res = await fetch(productionSaveMapDefaultUrl(), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'X-Map-Save-Token': token,
+        },
+        body: json,
+      })
+      const payload = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null
+      if (!res.ok || !payload?.ok) {
+        throw new Error(payload?.error ?? res.statusText)
+      }
+      setToast({ kind: 'success', message: 'تم حفظ القالب على الخادم في ملف map-default.json.' })
+      const fresh = await fetch(publicInitialMapUrl(), { cache: 'no-store' })
+      if (fresh.ok) {
+        importMap((await fresh.json()) as MapData)
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setToast({
+        kind: 'info',
+        message: `تعذر الكتابة على الخادم. تأكد من رفع save-map-default.php مع البناء وتطابق الرمز. ${msg}`,
       })
     }
-  }, [exportMap])
+  }, [exportMap, importMap])
 
   const handleImportDisk = useCallback(() => {
     importInputRef.current?.click()
@@ -1122,7 +1159,7 @@ export function MapCanvas() {
       <ConfirmDialog
         open={saveDefaultConfirmOpen}
         title="حفظ القالب الافتراضي"
-        message="سيُستخدم شكل الخريطة كما تراه الآن كنقطة بداية للتطبيق عند أول زيارة. يمكنك تعديل الخريطة لاحقاً في أي وقت. هل تريد المتابعة؟"
+        message="سيُستبدل ملف القالب الافتراضي على الخادم (map-default.json). يجب ضبط الرمز السري في البيئة والخادم كما في .env.example. هل تريد المتابعة؟"
         confirmLabel="نعم، احفظ"
         cancelLabel="إلغاء"
         confirmVariant="primary"

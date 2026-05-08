@@ -34,12 +34,18 @@ function safeParseMap(raw: string | null): MapData | null {
   }
 }
 
+function mapStorageDisabled(): boolean {
+  return import.meta.env.VITE_MAP_DISABLE_LOCAL_STORAGE === 'true'
+}
+
 function readStoredMap(key: string): MapData | null {
+  if (mapStorageDisabled()) return null
   if (!hasStorage()) return null
   return safeParseMap(window.localStorage.getItem(key))
 }
 
 function writeStoredMap(key: string, map: MapData) {
+  if (mapStorageDisabled()) return
   if (!hasStorage()) return
   try {
     window.localStorage.setItem(key, JSON.stringify(map))
@@ -735,7 +741,7 @@ useMapStore.subscribe((state) => {
 /** Load `public/map-default.json` once; hydrate store if there is no saved working/default design. */
 export async function bootstrapPublicMap(): Promise<void> {
   try {
-    const res = await fetch(publicInitialMapUrl())
+    const res = await fetch(publicInitialMapUrl(), { cache: 'no-store' })
     if (!res.ok) {
       console.warn(`[map] Initial map file missing (${res.status}):`, publicInitialMapUrl())
       return

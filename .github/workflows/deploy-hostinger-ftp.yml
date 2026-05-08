@@ -1,9 +1,14 @@
 # Deploy built static files to Hostinger over FTP.
 #
 # Repository secrets (Settings → Secrets and variables → Actions):
-#   FTP_SERVER    — Hostinger FTP hostname (e.g. ftp.yourdomain.com from hPanel → Files → FTP Accounts)
-#   FTP_USERNAME  — FTP user
-#   FTP_PASSWORD  — FTP password
+#   FTP_SERVER             — Hostinger FTP hostname (e.g. ftp.yourdomain.com from hPanel → Files → FTP Accounts)
+#   FTP_USERNAME           — FTP user
+#   FTP_PASSWORD           — FTP password
+#   VITE_MAP_SAVE_TOKEN    — Same value as MAP_SAVE_TOKEN on Hostinger (or the token in save-map-default.php).
+#                            Required for the “save default map” button on production; embedded at build time.
+#
+# Optional repository variables (Settings → Variables → Actions):
+#   VITE_MAP_DISABLE_LOCAL_STORAGE — set to `true` if you want file-only map persistence (no localStorage).
 #
 # If Hostinger requires FTPS or a non-default port, add under "with:" on the deploy step, for example:
 #   protocol: ftps
@@ -33,10 +38,14 @@ jobs:
           cache: npm
 
       - name: Install and build
+        env:
+          VITE_MAP_SAVE_TOKEN: ${{ secrets.VITE_MAP_SAVE_TOKEN }}
+          VITE_MAP_DISABLE_LOCAL_STORAGE: ${{ vars.VITE_MAP_DISABLE_LOCAL_STORAGE }}
         run: |
           npm ci
           npm run build
 
+      # dist/ includes index.html, assets/, and map-default.json (copied from public/ by Vite — site root URL /map-default.json).
       - name: Deploy to Hostinger via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.6
         with:
