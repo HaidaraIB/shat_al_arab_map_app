@@ -53,7 +53,7 @@ jobs:
           username: ${{ secrets.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD }}
           local-dir: ./dist/
-          server-dir: /public_html/
+          server-dir: /
           # Exclude secrets or large local-only files if you ever upload from repo root:
           # exclude: |
           #   **/.git*
