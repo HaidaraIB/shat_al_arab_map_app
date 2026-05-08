@@ -1,0 +1,51 @@
+# Deploy built static files to Hostinger over FTP.
+#
+# Repository secrets (Settings → Secrets and variables → Actions):
+#   FTP_SERVER    — Hostinger FTP hostname (e.g. ftp.yourdomain.com from hPanel → Files → FTP Accounts)
+#   FTP_USERNAME  — FTP user
+#   FTP_PASSWORD  — FTP password
+#
+# If Hostinger requires FTPS or a non-default port, add under "with:" on the deploy step, for example:
+#   protocol: ftps
+#   port: 21
+#
+# Adjust server-dir below if your site lives in a subdomain folder (e.g. /public_html/subdomain).
+
+name: Deploy to Hostinger (FTP)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Deploy to Hostinger via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.6
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          local-dir: ./dist/
+          server-dir: /public_html/
+          # Exclude secrets or large local-only files if you ever upload from repo root:
+          # exclude: |
+          #   **/.git*
+          #   **/.git*/**
