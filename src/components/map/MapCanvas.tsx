@@ -3,7 +3,13 @@ import { TransformComponent, TransformWrapper, type ReactZoomPanPinchRef } from 
 import { useMapStore } from '../../store/mapStore'
 import type { Block, ComponentTransform, Facility, MapData, MapLabel, Plot, Road } from '../../types/map'
 import { defaultComponentTransform } from '../../types/map'
-import { polygonBounds, polygonCentroid, pointsBoundingBox } from '../../utils/geometry'
+import {
+  blockLabelStripLayout,
+  plotCellPolygonFromGridQuad,
+  polygonBounds,
+  polygonCentroid,
+  pointsBoundingBox,
+} from '../../utils/geometry'
 import { componentGroupTransform, pointsToSvgPoints, screenToSvgPoint } from '../../utils/svg'
 import { mapContentSheetSize } from '../../utils/mapContentSheet'
 import { Label } from './Label'
@@ -76,6 +82,77 @@ function roadPivot(r: Road): { x: number; y: number } {
   return { x: bb.x + bb.width / 2, y: bb.y + bb.height / 2 }
 }
 
+type BlockMarkerLayout =
+  | {
+      mode: 'quad'
+      corners: { x: number; y: number }[]
+      cx: number
+      cy: number
+      label: string
+      fs: number
+      /** Perpendicular thickness in map units — caps label size. */
+      stripDepth: number
+      nx: number
+      ny: number
+    }
+  | {
+      mode: 'rect'
+      x: number
+      y: number
+      width: number
+      height: number
+      cx: number
+      cy: number
+      label: string
+      fs: number
+      stripDepth: number
+    }
+
+/** Label band like an extra unit row (or column): along first row if vertical grid, else along first column. */
+function blockMarkerLayout(block: Block, marker: MapLabel): BlockMarkerLayout {
+  const label = marker.text || block.label
+  const fs = marker.fontSize ?? 13
+  const strip = blockLabelStripLayout(block, {
+    stripDepthRatio: block.labelStripDepthRatio,
+  })
+  if (strip) {
+    return {
+      mode: 'quad',
+      corners: strip.corners,
+      cx: strip.cx,
+      cy: strip.cy,
+      label,
+      fs,
+      stripDepth: strip.stripDepth,
+      nx: strip.nx,
+      ny: strip.ny,
+    }
+  }
+  const polyBb = polygonBounds(block.polygon)
+  const ratio = block.labelStripDepthRatio ?? 0.4
+  const r = Math.min(0.65, Math.max(0.22, ratio))
+  const depthScale = 1.08 + r * 0.46
+  const cellH = Math.max(4, (polyBb.maxY - polyBb.minY) / Math.max(1, block.rows ?? 1))
+  const gap = 8 + r * 8
+  const rowH = cellH * depthScale + gap * 0.35
+  const w = Math.max(8, polyBb.maxX - polyBb.minX)
+  const x = polyBb.minX
+  const y = polyBb.minY - gap - rowH
+  const h = rowH
+  return {
+    mode: 'rect',
+    x,
+    y,
+    width: w,
+    height: h,
+    cx: x + w / 2,
+    cy: y + h / 2,
+    label,
+    fs,
+    stripDepth: h,
+  }
+}
+
 function blockTableBounds(b: Block, plots: Plot[], marker: MapLabel | undefined) {
   let minX = Infinity
   let minY = Infinity
@@ -92,11 +169,20 @@ function blockTableBounds(b: Block, plots: Plot[], marker: MapLabel | undefined)
   extend(b.polygon)
   for (const p of plots) extend(p.polygon)
   if (marker) {
-    const r = 24
-    minX = Math.min(minX, marker.position.x - r)
-    maxX = Math.max(maxX, marker.position.x + r)
-    minY = Math.min(minY, marker.position.y - r)
-    maxY = Math.max(maxY, marker.position.y + r)
+    const lay = blockMarkerLayout(b, marker)
+    if (lay.mode === 'quad') {
+      for (const p of lay.corners) {
+        minX = Math.min(minX, p.x)
+        minY = Math.min(minY, p.y)
+        maxX = Math.max(maxX, p.x)
+        maxY = Math.max(maxY, p.y)
+      }
+    } else {
+      minX = Math.min(minX, lay.x)
+      maxX = Math.max(maxX, lay.x + lay.width)
+      minY = Math.min(minY, lay.y)
+      maxY = Math.max(maxY, lay.y + lay.height)
+    }
   }
   if (!Number.isFinite(minX)) return { x: 0, y: 0, width: 0, height: 0 }
   const pad = 6
@@ -202,6 +288,8 @@ export function MapCanvas() {
   const addRoad = useMapStore((s) => s.addRoad)
   const addBlock = useMapStore((s) => s.addBlock)
   const setBlockGrid = useMapStore((s) => s.setBlockGrid)
+  const patchBlock = useMapStore((s) => s.patchBlock)
+  const viewportScale = useMapStore((s) => s.viewport.scale)
   const addFacility = useMapStore((s) => s.addFacility)
   const addLabel = useMapStore((s) => s.addLabel)
   const updateLabelText = useMapStore((s) => s.updateLabelText)
@@ -303,6 +391,16 @@ export function MapCanvas() {
     [blockLabels],
   )
 
+  const selectComponentExclusive = useCallback(
+    (e: React.MouseEvent, key: string) => {
+      e.preventDefault()
+      e.stopPropagation()
+      selectPlot(null)
+      selectComponentsOnly([key])
+    },
+    [selectComponentsOnly, selectPlot],
+  )
+
   const startComponentDrag = useCallback(
     (e: React.PointerEvent, key: string) => {
       const withToggleKey = e.ctrlKey || e.metaKey
@@ -364,9 +462,23 @@ export function MapCanvas() {
       e.stopPropagation()
       // Keep Ctrl/Cmd reserved for transform selection mode; avoid accidental modal open.
       if (e.ctrlKey || e.metaKey) return
+      // Second click of a double-click is ignored here; double-click selects the parent block instead.
+      if (e.detail >= 2) return
       selectPlot(plot.id)
     },
     [selectPlot],
+  )
+
+  const handlePlotDoubleClick = useCallback(
+    (plot: Plot, e: React.MouseEvent<SVGGElement>) => {
+      e.preventDefault()
+      e.stopPropagation()
+      selectPlot(null)
+      if (map.blocks.some((bl) => bl.id === plot.blockId)) {
+        selectComponentsOnly([blockKey(plot.blockId)])
+      }
+    },
+    [map.blocks, selectComponentsOnly, selectPlot],
   )
 
   const fitView = useCallback(() => {
@@ -501,6 +613,7 @@ export function MapCanvas() {
         transform={tf}
         className={`map-infra-select ${isTransformMode ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'}`}
         onPointerDown={(e) => startComponentDrag(e, key)}
+        onDoubleClick={(e) => selectComponentExclusive(e, key)}
       >
         <RoadPath road={r} selected={sel} />
         {lbl && <Label label={lbl} className="pointer-events-none fill-slate-700" />}
@@ -526,6 +639,7 @@ export function MapCanvas() {
         transform={tfPoly}
         className={`map-infra-select ${isTransformMode ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'}`}
         onPointerDown={(e) => startComponentDrag(e, keyPoly)}
+        onDoubleClick={(e) => selectComponentExclusive(e, keyPoly)}
       >
         <polygon
           points={pointsToSvgPoints(f.polygon)}
@@ -568,6 +682,7 @@ export function MapCanvas() {
         transform={tfLbl}
         className={`map-infra-select ${isTransformMode ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'}`}
         onPointerDown={(e) => startComponentDrag(e, keyLbl)}
+        onDoubleClick={(e) => selectComponentExclusive(e, keyLbl)}
       >
         <rect
           x={bbLbl.x}
@@ -616,6 +731,8 @@ export function MapCanvas() {
     const t = mergeTransform(ct, key)
     const pivot = polygonCentroid(b.polygon)
     const tf = componentGroupTransform(pivot.x, pivot.y, t)
+    const sx = Math.max(0.04, Number.isFinite(t.scaleX) ? t.scaleX : t.uniformScale ?? 1)
+    const sy = Math.max(0.04, Number.isFinite(t.scaleY) ? t.scaleY : t.uniformScale ?? 1)
     const sel = selectedKeys.includes(key)
     const bb = blockTableBounds(b, plots, marker)
     return (
@@ -624,6 +741,7 @@ export function MapCanvas() {
         transform={tf}
         className={`map-infra-select ${isTransformMode ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'}`}
         onPointerDown={(e) => startComponentDrag(e, key)}
+        onDoubleClick={(e) => selectComponentExclusive(e, key)}
       >
         {bb.width > 0 && (
           <rect
@@ -644,6 +762,62 @@ export function MapCanvas() {
             className="pointer-events-none"
           />
         )}
+        {layers.blockMarkers && marker && (() => {
+          const lay = blockMarkerLayout(b, marker)
+          const vs = Math.max(0.04, viewportScale)
+          const depth = lay.stripDepth
+          /** Match PlotPolygon unit label baseline (9/vs), then bump for “special” header. */
+          const unitFs = 9 / vs
+          const fsFromMarker = lay.fs / vs
+          const fsFloor = unitFs * 1.22
+          const fsCap = depth * 0.58
+          const fs = Math.max(7, Math.min(fsCap, Math.max(fsFloor, fsFromMarker * 0.95)))
+          const tx =
+            lay.mode === 'quad' ? lay.cx + lay.nx * (depth * 0.12) : lay.cx
+          const ty =
+            lay.mode === 'quad' ? lay.cy + lay.ny * (depth * 0.12) : lay.cy - depth * 0.08
+          const counterRot =
+            Math.abs(t.rotationDeg) > 0.08 ? `rotate(${-t.rotationDeg}, ${tx}, ${ty})` : undefined
+          return (
+            <g className="pointer-events-none">
+              {lay.mode === 'quad' ? (
+                <polygon
+                  points={pointsToSvgPoints(lay.corners)}
+                  fill="#f8fafc"
+                  stroke="#cbd5e1"
+                  strokeWidth={1}
+                />
+              ) : (
+                <rect
+                  x={lay.x}
+                  y={lay.y}
+                  width={lay.width}
+                  height={lay.height}
+                  rx={6}
+                  fill="#f8fafc"
+                  stroke="#cbd5e1"
+                  strokeWidth={1}
+                />
+              )}
+              <g transform={counterRot}>
+                <text
+                  x={tx}
+                  y={ty}
+                  textAnchor="middle"
+                  dominantBaseline="central"
+                  className="pointer-events-none select-none fill-slate-900 font-black [text-rendering:geometricPrecision]"
+                  style={{
+                    fontSize: fs,
+                    fontWeight: marker.fontWeight ?? '800',
+                    letterSpacing: '0.04em',
+                  }}
+                >
+                  {lay.label}
+                </text>
+              </g>
+            </g>
+          )
+        })()}
         {layers.plots &&
           plots.map((plot) => (
             <PlotPolygon
@@ -651,24 +825,16 @@ export function MapCanvas() {
               plot={plot}
               hovered={hoveredPlotId === plot.id}
               selected={selectedPlotId === plot.id}
+              inverseScaleX={sx}
+              inverseScaleY={sy}
+              viewportScale={viewportScale}
+              blockRotationDeg={t.rotationDeg}
               onPointerEnter={() => setHoveredPlot(plot.id)}
               onPointerLeave={() => setHoveredPlot(null)}
               onClick={(e) => handlePlotClick(plot, e)}
+              onDoubleClick={(e) => handlePlotDoubleClick(plot, e)}
             />
           ))}
-        {layers.blockMarkers && marker && (
-          <g>
-            <circle
-              cx={marker.position.x}
-              cy={marker.position.y}
-              r={22}
-              fill="white"
-              stroke="#ea580c"
-              strokeWidth={2}
-            />
-            <Label label={{ ...marker, fontSize: marker.fontSize ?? 12 }} />
-          </g>
-        )}
         {sel && (
           <polygon
             points={pointsToSvgPoints(b.polygon)}
@@ -697,6 +863,7 @@ export function MapCanvas() {
         transform={tf}
         className={`map-infra-select ${isTransformMode ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'}`}
         onPointerDown={(e) => startComponentDrag(e, key)}
+        onDoubleClick={(e) => selectComponentExclusive(e, key)}
       >
         <rect
           x={bb.x}
@@ -768,7 +935,23 @@ export function MapCanvas() {
     for (const r of map.roads) nodes.set(roadKey(r.id), renderRoad(r))
     for (const l of otherLabels) nodes.set(`label:${l.id}`, renderStandaloneLabel(l))
     return nodes
-  }, [ct, isTransformMode, layers, map.blocks, map.facilities, map.roads, otherLabels, renderRoad, selectedKeys])
+  }, [
+    ct,
+    handlePlotDoubleClick,
+    hoveredPlotId,
+    isTransformMode,
+    layers,
+    map.blocks,
+    map.facilities,
+    map.roads,
+    otherLabels,
+    renderRoad,
+    selectComponentExclusive,
+    selectedKeys,
+    selectedPlotId,
+    startComponentDrag,
+    viewportScale,
+  ])
 
   const primarySelectedKey = selectedKeys[0] ?? null
   const selectedTypeLabel = useMemo(() => {
@@ -802,6 +985,27 @@ export function MapCanvas() {
     return null
   }, [map.facilities, map.labels, primarySelectedKey])
 
+  const selectedBlockIdForToolbar = primarySelectedKey?.startsWith('block:')
+    ? primarySelectedKey.replace('block:', '')
+    : null
+
+  const selectedBlockLabelStripPercent = useMemo(() => {
+    if (!selectedBlockIdForToolbar) return null
+    const bl = map.blocks.find((b) => b.id === selectedBlockIdForToolbar)
+    if (!bl) return null
+    const r = bl.labelStripDepthRatio ?? 0.4
+    return Math.round(Math.min(0.65, Math.max(0.22, r)) * 100)
+  }, [map.blocks, selectedBlockIdForToolbar])
+
+  const handleSetBlockLabelStripPercent = useCallback(
+    (pct: number) => {
+      if (!selectedBlockIdForToolbar) return
+      const ratio = Math.min(0.65, Math.max(0.22, pct / 100))
+      patchBlock(selectedBlockIdForToolbar, { labelStripDepthRatio: ratio })
+    },
+    [patchBlock, selectedBlockIdForToolbar],
+  )
+
   const makeId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
 
   const addContextPlot = useCallback((requestedBlockId: string, requestedLabel: string, requestedRow: number, requestedCol: number) => {
@@ -816,6 +1020,9 @@ export function MapCanvas() {
     const b = polygonBounds(block.polygon)
     const occupied = map.plots.some((p) => {
       if (p.blockId !== blockId) return false
+      const mr = Number(p.meta?.row)
+      const mc = Number(p.meta?.col)
+      if (Number.isFinite(mr) && Number.isFinite(mc)) return mr === row && mc === col
       const pos = resolvePlotGridCell(p, b, gridRows, gridCols)
       return pos.row === row && pos.col === col
     })
@@ -824,23 +1031,30 @@ export function MapCanvas() {
       return
     }
     const blockPlotsCount = map.plots.filter((p) => p.blockId === blockId).length
-    const cellW = (b.maxX - b.minX) / gridCols
-    const cellH = (b.maxY - b.minY) / gridRows
-    /** Match legacy/demo plots: polygons are flush to the cell grid (no inset). */
     const id = makeId('plot')
     const fallbackNumber = String(blockPlotsCount + 1).padStart(2, '0')
     const number = requestedLabel || fallbackNumber
+    let polygon: Plot['polygon']
+    if (block.polygon.length === 4) {
+      const cell = plotCellPolygonFromGridQuad(block.polygon, gridRows, gridCols, row, col)
+      if (!cell) return
+      polygon = cell
+    } else {
+      const cellW = (b.maxX - b.minX) / gridCols
+      const cellH = (b.maxY - b.minY) / gridRows
+      polygon = [
+        { x: b.minX + col * cellW, y: b.minY + row * cellH },
+        { x: b.minX + (col + 1) * cellW, y: b.minY + row * cellH },
+        { x: b.minX + (col + 1) * cellW, y: b.minY + (row + 1) * cellH },
+        { x: b.minX + col * cellW, y: b.minY + (row + 1) * cellH },
+      ]
+    }
     addPlot({
       id,
       number,
       status: 'available',
       blockId,
-      polygon: [
-        { x: b.minX + col * cellW, y: b.minY + row * cellH },
-        { x: b.minX + (col + 1) * cellW, y: b.minY + row * cellH },
-        { x: b.minX + (col + 1) * cellW, y: b.minY + (row + 1) * cellH },
-        { x: b.minX + col * cellW, y: b.minY + (row + 1) * cellH },
-      ],
+      polygon,
       meta: { row, col },
     })
   }, [addPlot, map.blocks, map.plots, selectedKeys])
@@ -1148,6 +1362,8 @@ export function MapCanvas() {
         onZoomIn={() => transformRef.current?.zoomIn(0.4, 200)}
         onZoomOut={() => transformRef.current?.zoomOut(0.4, 200)}
         onFitView={fitView}
+        selectedBlockLabelStripPercent={selectedBlockLabelStripPercent}
+        onSetBlockLabelStripPercent={handleSetBlockLabelStripPercent}
       />
       <input
         ref={importInputRef}

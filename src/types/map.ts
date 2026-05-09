@@ -36,6 +36,11 @@ export type Block = {
   cols?: number
   strokeColor?: string
   fillColor?: string
+  /**
+   * Title strip thickness as a fraction of one unit row/column step (map space), typically 0.22–0.65.
+   * Omit for editor default (~0.4).
+   */
+  labelStripDepthRatio?: number
 }
 
 export type FacilityKind = 'school' | 'market' | 'service' | 'utility' | 'other'

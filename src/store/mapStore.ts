@@ -15,8 +15,38 @@ import type {
 import { defaultComponentTransform } from '../types/map'
 import type { Block as LegacyBlock } from '../types'
 import { UnitStatus } from '../types'
-import { polygonCentroid, resizeGridQuad, translatePolygon } from '../utils/geometry'
+import {
+  nearestGridCellIndex,
+  plotCellPolygonFromGridQuad,
+  polygonCentroid,
+  resizeGridQuad,
+  translatePolygon,
+} from '../utils/geometry'
 import { publicInitialMapUrl } from '../config/publicMap'
+
+/** After grid resize, recompute each plot polygon so cell size matches the block quad (fixes stretched/misaligned units). */
+function remapPlotsToBlockGrid(plots: Plot[], blockId: string, quad: Point[], rows: number, cols: number): Plot[] {
+  const R = Math.max(1, rows)
+  const C = Math.max(1, cols)
+  return plots.map((p) => {
+    if (p.blockId !== blockId) return p
+    let r: number
+    let c: number
+    const mr = Number(p.meta?.row)
+    const mc = Number(p.meta?.col)
+    if (Number.isFinite(mr) && Number.isFinite(mc)) {
+      r = Math.min(R - 1, Math.max(0, Math.floor(mr)))
+      c = Math.min(C - 1, Math.max(0, Math.floor(mc)))
+    } else {
+      const q = nearestGridCellIndex(quad, R, C, polygonCentroid(p.polygon))
+      r = q.row
+      c = q.col
+    }
+    const cell = plotCellPolygonFromGridQuad(quad, R, C, r, c)
+    if (!cell) return p
+    return { ...p, polygon: cell, meta: { ...(p.meta ?? {}), row: r, col: c } }
+  })
+}
 
 const MAP_DEFAULT_STORAGE_KEY = 'shat_al_arab_map_default_design_v1'
 const MAP_WORKING_STORAGE_KEY = 'shat_al_arab_map_working_design_v1'
@@ -227,6 +257,7 @@ type MapState = {
   deleteRoad: (id: string) => void
   addBlock: (block: MapBlock) => void
   setBlockGrid: (id: string, rows: number, cols: number) => void
+  patchBlock: (id: string, patch: Partial<MapBlock>) => void
   deleteBlock: (id: string) => void
   addFacility: (facility: Facility) => void
   deleteFacility: (id: string) => void
@@ -480,6 +511,7 @@ export const useMapStore = create<MapState>((set, get) => ({
     set((s) => {
       const newRows = Math.max(1, Math.floor(rows))
       const newCols = Math.max(1, Math.floor(cols))
+      let nextPlots = s.map.plots
       const blocks = s.map.blocks.map((b) => {
         if (b.id !== id) return b
         const oldRows = Math.max(1, b.rows ?? 1)
@@ -487,6 +519,9 @@ export const useMapStore = create<MapState>((set, get) => ({
         if (newRows === oldRows && newCols === oldCols) return b
         const nextPoly = resizeGridQuad(b.polygon, oldRows, oldCols, newRows, newCols)
         const polygon = nextPoly ?? b.polygon
+        if (nextPoly && nextPoly.length === 4) {
+          nextPlots = remapPlotsToBlockGrid(nextPlots, id, nextPoly, newRows, newCols)
+        }
         return { ...b, rows: newRows, cols: newCols, polygon }
       })
       const blk = blocks.find((b) => b.id === id)
@@ -494,8 +529,16 @@ export const useMapStore = create<MapState>((set, get) => ({
       const labels = s.map.labels.map((l) =>
         l.id === markerId && blk ? { ...l, position: polygonCentroid(blk.polygon) } : l,
       )
-      return { map: { ...s.map, blocks, labels } }
+      return { map: { ...s.map, blocks, plots: nextPlots, labels } }
     }),
+
+  patchBlock: (id, patch) =>
+    set((s) => ({
+      map: {
+        ...s.map,
+        blocks: s.map.blocks.map((b) => (b.id === id ? { ...b, ...patch } : b)),
+      },
+    })),
 
   deleteBlock: (id) =>
     set((s) => ({

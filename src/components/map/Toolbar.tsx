@@ -42,6 +42,9 @@ type Props = {
   onZoomIn: () => void
   onZoomOut: () => void
   onFitView: () => void
+  /** 22–65 = % of one cell step along strip normal; null when no block selected. */
+  selectedBlockLabelStripPercent?: number | null
+  onSetBlockLabelStripPercent?: (percent: number) => void
 }
 
 /** لوحة أدوات الخريطة — العربية فقط، مع طيّ وإظهار. */
@@ -81,6 +84,8 @@ export function Toolbar({
   onZoomIn,
   onZoomOut,
   onFitView,
+  selectedBlockLabelStripPercent = null,
+  onSetBlockLabelStripPercent,
 }: Props) {
   const [expanded, setExpanded] = useState(true)
   const [labelDraft, setLabelDraft] = useState('')
@@ -238,6 +243,29 @@ export function Toolbar({
             <p className="text-[10px] text-slate-500">
               النوع: {selectedTypeLabel ?? 'لا يوجد'}
             </p>
+            {selectedBlockLabelStripPercent != null && onSetBlockLabelStripPercent && (
+              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-bold text-slate-700">ارتفاع شريط عنوان البلوك</span>
+                  <span className="text-[10px] font-bold tabular-nums text-slate-600">
+                    {selectedBlockLabelStripPercent}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={22}
+                  max={65}
+                  step={1}
+                  value={selectedBlockLabelStripPercent}
+                  onChange={(e) => onSetBlockLabelStripPercent(Number(e.target.value))}
+                  className="w-full accent-indigo-600"
+                  aria-label="ارتفاع شريط عنوان البلوك"
+                />
+                <p className="text-[9px] text-slate-500 leading-snug">
+                  يضبط سُمك الشريط فوق الصف/العمود الأول (أعرض من خانة الوحدة قليلًا افتراضيًا).
+                </p>
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-1">
               <button
                 type="button"

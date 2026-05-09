@@ -21,26 +21,43 @@ export const PlotPolygon = memo(
     plot,
     hovered = false,
     selected = false,
+    /** Cancels non-uniform scale from parent component transform so digits stay round. */
+    inverseScaleX = 1,
+    inverseScaleY = 1,
+    /** View zoom scale — keeps label roughly constant px size while pan-zooming. */
+    viewportScale = 1,
+    /** Same as block title: counter parent `componentGroupTransform` rotation so digits read like “B2” / “C1”. */
+    blockRotationDeg = 0,
     onPointerEnter,
     onPointerLeave,
     onClick,
+    onDoubleClick,
   }: {
     plot: Plot
     hovered?: boolean
     selected?: boolean
+    inverseScaleX?: number
+    inverseScaleY?: number
+    viewportScale?: number
+    blockRotationDeg?: number
     onPointerEnter?: () => void
     onPointerLeave?: () => void
     onClick?: (e: React.MouseEvent<SVGGElement>) => void
+    onDoubleClick?: (e: React.MouseEvent<SVGGElement>) => void
   }) {
     const pts = pointsToSvgPoints(plot.polygon)
     const c = polygonCentroid(plot.polygon)
-    const edgeA = plot.polygon[0]
-    const edgeB = plot.polygon[1]
-    const rawAngle = edgeA && edgeB ? (Math.atan2(edgeB.y - edgeA.y, edgeB.x - edgeA.x) * 180) / Math.PI : 0
-    const labelAngle = rawAngle > 90 ? rawAngle - 180 : rawAngle < -90 ? rawAngle + 180 : rawAngle
+    const counterRot =
+      Math.abs(blockRotationDeg) > 0.08
+        ? `rotate(${-blockRotationDeg}, ${c.x}, ${c.y})`
+        : undefined
     const fill = STATUS_FILL[plot.status]
     const stroke = STATUS_STROKE[plot.status]
     const isHot = hovered || selected
+    const vs = Math.max(0.04, viewportScale)
+    const sx = Math.max(0.04, inverseScaleX)
+    const sy = Math.max(0.04, inverseScaleY)
+    const fontPx = Math.max(5, Math.min(20, 9 / vs))
 
     return (
       <g
@@ -48,6 +65,7 @@ export const PlotPolygon = memo(
         onPointerEnter={onPointerEnter}
         onPointerLeave={onPointerLeave}
         onClick={onClick}
+        onDoubleClick={onDoubleClick}
       >
         <polygon
           points={pts}
@@ -69,17 +87,36 @@ export const PlotPolygon = memo(
             className="pointer-events-none"
           />
         )}
-        <text
-          x={c.x}
-          y={c.y}
-          transform={`rotate(${labelAngle} ${c.x} ${c.y})`}
-          textAnchor="middle"
-          dominantBaseline="central"
-          className="pointer-events-none select-none fill-slate-900 font-bold"
-          style={{ fontSize: 9 }}
+        <g
+          className="pointer-events-none"
+          transform={`translate(${c.x}, ${c.y}) scale(${1 / sx}, ${1 / sy}) translate(${-c.x}, ${-c.y})`}
         >
-          {plot.number}
-        </text>
+          {counterRot ? (
+            <g transform={counterRot}>
+              <text
+                x={c.x}
+                y={c.y}
+                textAnchor="middle"
+                dominantBaseline="central"
+                className="pointer-events-none select-none fill-slate-900 font-bold [text-rendering:geometricPrecision]"
+                style={{ fontSize: fontPx }}
+              >
+                {plot.number}
+              </text>
+            </g>
+          ) : (
+            <text
+              x={c.x}
+              y={c.y}
+              textAnchor="middle"
+              dominantBaseline="central"
+              className="pointer-events-none select-none fill-slate-900 font-bold [text-rendering:geometricPrecision]"
+              style={{ fontSize: fontPx }}
+            >
+              {plot.number}
+            </text>
+          )}
+        </g>
       </g>
     )
   },
@@ -87,7 +124,12 @@ export const PlotPolygon = memo(
     a.plot === b.plot &&
     a.hovered === b.hovered &&
     a.selected === b.selected &&
+    a.inverseScaleX === b.inverseScaleX &&
+    a.inverseScaleY === b.inverseScaleY &&
+    a.viewportScale === b.viewportScale &&
+    a.blockRotationDeg === b.blockRotationDeg &&
     a.onPointerEnter === b.onPointerEnter &&
     a.onPointerLeave === b.onPointerLeave &&
-    a.onClick === b.onClick,
+    a.onClick === b.onClick &&
+    a.onDoubleClick === b.onDoubleClick,
 )
