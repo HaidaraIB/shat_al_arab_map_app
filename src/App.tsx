@@ -20,12 +20,25 @@ import {
   Minimize2,
   Save,
   RotateCcw,
-  UserPlus
+  UserPlus,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
-import { Unit, UnitStatus, Block, User, UserRole } from './types';
+import { Unit, UnitStatus, Block } from './types';
 import { legacyBlocksFromMapData } from './utils/legacyBlocksFromMap';
 import { MapCanvas } from './components/map/MapCanvas';
-import { useMapStore } from './store/mapStore';
+import { ConfirmDialog } from './components/map/ConfirmDialog';
+import { LoadingSpinner } from './components/ui/LoadingIndicator';
+import { useMapStore, bootstrapPublicMap } from './store/mapStore';
+import { useAuth } from './lib/auth';
+import { getSupabase } from './lib/supabase';
+import { upsertPlotStateFromPlot, reseedPlotStateRemote } from './lib/mapRemote';
+import { createEmployee, updateEmployeeRole } from './lib/employees';
+import type { Database } from './lib/database.types';
+import type { UserRole } from './lib/database.types';
+
+type SalesLogRow = Database['public']['Tables']['sales_log']['Row'];
+type ProfileRow = Database['public']['Tables']['profiles']['Row'];
 
 interface CategoryConfig {
   basePrice: number;
@@ -41,20 +54,14 @@ const DEFAULT_CONFIGS: Record<'A' | 'B' | 'C', CategoryConfig> = {
 };
 
 export default function App() {
+  const { profile, isAdmin, signOut } = useAuth();
   const [configs, setConfigs] = useState(DEFAULT_CONFIGS);
   const [searchTerm, setSearchTerm] = useState('');
   const [filter, setFilter] = useState<'all' | UnitStatus>('all');
   const [selectedUnit, setSelectedUnit] = useState<Unit | null>(null);
   const [view, setView] = useState<'dashboard' | 'map' | 'settings' | 'sales_reports' | 'notifications' | 'profile' | 'users'>('map');
-  const [currentUser, setCurrentUser] = useState<UserRole>(UserRole.ADMIN);
-  const [users, setUsers] = useState<User[]>([
-    { id: '1', name: 'أحمد علي', email: 'ahmed@example.com', role: UserRole.ADMIN, createdAt: new Date().toISOString() },
-    { id: '2', name: 'سارة محمد', email: 'sara@example.com', role: UserRole.SALES, createdAt: new Date().toISOString() },
-  ]);
-  const [isAddUserModalOpen, setIsAddUserModalOpen] = useState(false);
-  const [newUserName, setNewUserName] = useState('');
-  const [newUserEmail, setNewUserEmail] = useState('');
-  const [newUserRole, setNewUserRole] = useState<UserRole>(UserRole.SALES);
+  const [teamProfiles, setTeamProfiles] = useState<ProfileRow[]>([]);
+  const [salesLog, setSalesLog] = useState<SalesLogRow[]>([]);
   const [reservationDuration, setReservationDuration] = useState<number>(24);
   const [manualCollectionRate, setManualCollectionRate] = useState<number | null>(null);
   const [isEditingCollection, setIsEditingCollection] = useState(false);
@@ -68,11 +75,80 @@ export default function App() {
   const [tempPrice, setTempPrice] = useState<number | string>('');
   const [editingUnitIdInTable, setEditingUnitIdInTable] = useState<string | null>(null);
   const [tempPriceInTable, setTempPriceInTable] = useState<number | string>('');
+  const [signOutConfirmOpen, setSignOutConfirmOpen] = useState(false);
+  const [resetDefaultsConfirmOpen, setResetDefaultsConfirmOpen] = useState(false);
+  const [roleChangeRequest, setRoleChangeRequest] = useState<null | {
+    userId: string
+    userName: string
+    nextRole: UserRole
+  }>(null)
+  const [signOutActionLoading, setSignOutActionLoading] = useState(false)
+  const [resetDefaultsLoading, setResetDefaultsLoading] = useState(false)
+  const [roleChangeLoading, setRoleChangeLoading] = useState(false)
   const selectedPlotIdOnMap = useMapStore((s) => s.selectedPlotId);
   const plotSelectionOpensUnitModal = useMapStore((s) => s.plotSelectionOpensUnitModal);
   const hoveredPlotIdOnMap = useMapStore((s) => s.hoveredPlotId);
   const mapData = useMapStore((s) => s.map);
   const updateMapPlot = useMapStore((s) => s.updatePlot);
+
+  useEffect(() => {
+    void bootstrapPublicMap()
+  }, [])
+
+  const SALES_ALLOWED_VIEWS = ['map', 'profile'] as const
+  useEffect(() => {
+    if (!isAdmin && !SALES_ALLOWED_VIEWS.includes(view as typeof SALES_ALLOWED_VIEWS[number])) {
+      setView('map')
+    }
+  }, [isAdmin, view])
+
+  useEffect(() => {
+    const supabase = getSupabase()
+    if (!supabase) return
+
+    void supabase
+      .from('sales_log')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(200)
+      .then(({ data }) => {
+        setSalesLog((data ?? []) as SalesLogRow[])
+      })
+
+    const ch = supabase
+      .channel('sales_log_ins')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'sales_log' },
+        (payload) => {
+          const row = payload.new as SalesLogRow
+          setSalesLog((prev) => [row, ...prev].slice(0, 200))
+        },
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(ch)
+    }
+  }, [])
+
+  const reloadTeamProfiles = React.useCallback(async () => {
+    const supabase = getSupabase()
+    if (!supabase) return
+    const { data } = await supabase
+      .from('profiles')
+      .select('*')
+      .order('created_at', { ascending: true })
+    setTeamProfiles((data ?? []) as ProfileRow[])
+  }, [])
+
+  useEffect(() => {
+    if (!isAdmin) {
+      setTeamProfiles([])
+      return
+    }
+    void reloadTeamProfiles()
+  }, [isAdmin, view, reloadTeamProfiles])
 
   const data = useMemo(() => legacyBlocksFromMapData(mapData), [mapData]);
 
@@ -99,19 +175,21 @@ export default function App() {
     };
   }, [data]);
 
-  const updateUnitPrice = (unitId: string, newPrice: number) => {
-    updateMapPlot(unitId, { meta: { ...(mapData.plots.find((p) => p.id === unitId)?.meta ?? {}), price: newPrice } });
-  };
+  const updateUnitPrice = async (unitId: string, newPrice: number) => {
+    updateMapPlot(unitId, { meta: { ...(mapData.plots.find((p) => p.id === unitId)?.meta ?? {}), price: newPrice } })
+    const plot = useMapStore.getState().map.plots.find((p) => p.id === unitId)
+    if (plot) await upsertPlotStateFromPlot(plot)
+  }
 
-  const handleBooking = (unitId: string, status: UnitStatus, name?: string, note?: string, durationHours?: number) => {
+  const handleBooking = async (unitId: string, status: UnitStatus, name?: string, note?: string, durationHours?: number) => {
     const reservedUntilIso =
       (status === UnitStatus.RESERVED && durationHours)
         ? new Date(Date.now() + durationHours * 60 * 60 * 1000).toISOString()
-        : undefined;
-    const plot = mapData.plots.find((p) => p.id === unitId);
+        : undefined
+    const plot = mapData.plots.find((p) => p.id === unitId)
     if (plot) {
       updateMapPlot(unitId, {
-        status: status as any,
+        status: status as 'sold' | 'reserved' | 'available',
         meta: {
           ...(plot.meta ?? {}),
           customerName: status !== UnitStatus.AVAILABLE ? name : undefined,
@@ -119,13 +197,14 @@ export default function App() {
           reservedAt: status === UnitStatus.RESERVED ? new Date().toISOString() : undefined,
           reservedUntil: reservedUntilIso,
         },
-      });
+      })
+      const next = useMapStore.getState().map.plots.find((p) => p.id === unitId)
+      if (next) await upsertPlotStateFromPlot(next)
     }
 
-    // Reset fields
-    setBookingName('');
-    setBookingNote('');
-  };
+    setBookingName('')
+    setBookingNote('')
+  }
 
   const openUnitModal = (unit: Unit) => {
     setSelectedUnit(unit);
@@ -168,16 +247,16 @@ export default function App() {
     })).filter(b => b.units.length > 0);
   }, [data, searchTerm, filter]);
 
-  const updateAllPrices = (newConfigs: typeof configs) => {
+  const updateAllPrices = async (newConfigs: typeof configs) => {
     useMapStore.setState((s) => ({
       map: {
         ...s.map,
         plots: s.map.plots.map((plot) => {
-          const meta = (plot.meta ?? {}) as Record<string, unknown>;
-          const cat = meta.category as 'A' | 'B' | 'C' | undefined;
-          if (!cat || !newConfigs[cat]) return plot;
-          const cfg = newConfigs[cat];
-          const isCorner = meta.unitType === 'ركن';
+          const meta = (plot.meta ?? {}) as Record<string, unknown>
+          const cat = meta.category as 'A' | 'B' | 'C' | undefined
+          if (!cat || !newConfigs[cat]) return plot
+          const cfg = newConfigs[cat]
+          const isCorner = meta.unitType === 'ركن'
           return {
             ...plot,
             meta: {
@@ -185,49 +264,53 @@ export default function App() {
               price: isCorner ? cfg.basePrice * (1 + cfg.cornerPremium / 100) : cfg.basePrice,
               area: isCorner ? cfg.baseArea + cfg.cornerAreaBonus : cfg.baseArea,
             },
-          };
+          }
         }),
       },
-    }));
-  };
+    }))
+    await reseedPlotStateRemote(useMapStore.getState().map)
+  }
 
-  const handleAddUser = () => {
-    if (!newUserName || !newUserEmail) return;
-    const newUser: User = {
-      id: Date.now().toString(),
-      name: newUserName,
-      email: newUserEmail,
-      role: newUserRole,
-      createdAt: new Date().toISOString()
-    };
-    setUsers([...users, newUser]);
-    setNewUserName('');
-    setNewUserEmail('');
-    setIsAddUserModalOpen(false);
-  };
+  const handleConfirmSignOut = async () => {
+    setSignOutActionLoading(true)
+    try {
+      await signOut()
+      setSignOutConfirmOpen(false)
+    } finally {
+      setSignOutActionLoading(false)
+    }
+  }
 
-  const removeUser = (id: string) => {
-    setUsers(users.filter(u => u.id !== id));
-  };
+  const handleConfirmResetDefaults = async () => {
+    setResetDefaultsLoading(true)
+    try {
+      setConfigs(DEFAULT_CONFIGS)
+      await updateAllPrices(DEFAULT_CONFIGS)
+      setResetDefaultsConfirmOpen(false)
+    } finally {
+      setResetDefaultsLoading(false)
+    }
+  }
+
+  const handleConfirmRoleChange = async () => {
+    if (!roleChangeRequest) return
+    const { userId, nextRole } = roleChangeRequest
+    setRoleChangeLoading(true)
+    try {
+      const res = await updateEmployeeRole(userId, nextRole)
+      if (res.ok) {
+        await reloadTeamProfiles()
+        setRoleChangeRequest(null)
+      } else {
+        alert(res.error)
+      }
+    } finally {
+      setRoleChangeLoading(false)
+    }
+  }
 
   return (
     <div className={`min-h-screen flex bg-slate-100 font-sans text-slate-800 selection:bg-primary/20 selection:text-primary ${view === 'map' ? 'overflow-visible' : 'overflow-hidden'}`} dir="rtl">
-      {/* Role Switcher (For Demo Only) */}
-      <div className="fixed bottom-4 left-4 z-[9999] flex gap-2">
-        <button 
-          onClick={() => {
-            setCurrentUser(UserRole.ADMIN);
-          }}
-          className={`px-4 py-2 rounded-full text-[10px] font-black transition-all shadow-xl ${currentUser === UserRole.ADMIN ? 'bg-primary text-white' : 'bg-white text-slate-400 opacity-50'}`}
-        >أدمن</button>
-        <button 
-          onClick={() => {
-            setCurrentUser(UserRole.SALES);
-            if (view === 'users') setView('map');
-          }}
-          className={`px-4 py-2 rounded-full text-[10px] font-black transition-all shadow-xl ${currentUser === UserRole.SALES ? 'bg-primary text-white' : 'bg-white text-slate-400 opacity-50'}`}
-        >مندوب مبيعات</button>
-      </div>
       {/* Sidebar */}
       <AnimatePresence>
         {isSidebarOpen && !isFullscreen && (
@@ -244,13 +327,15 @@ export default function App() {
               </div>
             </div>
             <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
-              <SidebarItem icon={<LayoutGrid size={20} />} label="لوحة التحكم" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
+              {isAdmin && (
+                <SidebarItem icon={<LayoutGrid size={20} />} label="لوحة التحكم" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
+              )}
               <SidebarItem icon={<MapIcon size={20} />} label="خريطة المدينة" active={view === 'map'} onClick={() => setView('map')} />
-              <div className="pt-4 pb-2 px-3 text-[10px] font-bold text-slate-400 uppercase tracking-widest">الإحصائيات</div>
-              <SidebarItem icon={<TrendingUp size={20} />} label="تقارير البيع" active={view === 'sales_reports'} onClick={() => setView('sales_reports')} />
-              <SidebarItem icon={<Bell size={20} />} label="التنبيهات" badge={soldUnits.length.toString()} active={view === 'notifications'} onClick={() => setView('notifications')} />
-              {currentUser === UserRole.ADMIN && (
+              {isAdmin && (
                 <>
+                  <div className="pt-4 pb-2 px-3 text-[10px] font-bold text-slate-400 uppercase tracking-widest">الإحصائيات</div>
+                  <SidebarItem icon={<TrendingUp size={20} />} label="تقارير البيع" active={view === 'sales_reports'} onClick={() => setView('sales_reports')} />
+                  <SidebarItem icon={<Bell size={20} />} label="التنبيهات" badge={salesLog.length.toString()} active={view === 'notifications'} onClick={() => setView('notifications')} />
                   <div className="pt-4 pb-2 px-3 text-[10px] font-bold text-slate-400 uppercase tracking-widest">الإدارة</div>
                   <SidebarItem icon={<UsersIcon size={20} />} label="موظفي المبيعات" active={view === 'users'} onClick={() => setView('users')} />
                 </>
@@ -258,8 +343,15 @@ export default function App() {
             </nav>
             <div className="p-4 border-t border-slate-100 space-y-1">
               <SidebarItem icon={<UserIcon size={20} />} label="الملف الشخصي" active={view === 'profile'} onClick={() => setView('profile')} />
-              <SidebarItem icon={<Settings size={20} />} label="الإعدادات" active={view === 'settings'} onClick={() => setView('settings')} />
-              <SidebarItem icon={<LogOut size={20} />} label="خروج" className="text-red-500 hover:bg-red-50" />
+              {isAdmin && (
+                <SidebarItem icon={<Settings size={20} />} label="الإعدادات" active={view === 'settings'} onClick={() => setView('settings')} />
+              )}
+              <SidebarItem
+                icon={<LogOut size={20} />}
+                label="خروج"
+                className="text-red-500 hover:bg-red-50"
+                onClick={() => setSignOutConfirmOpen(true)}
+              />
             </div>
           </motion.aside>
         )}
@@ -412,29 +504,40 @@ export default function App() {
 
                 <div className="bg-white rounded-[40px] border border-slate-200 shadow-xl overflow-hidden">
                   <div className="p-6 border-b border-slate-100 bg-slate-50/50">
-                    <h3 className="font-black text-slate-800">أحدث عمليات البيع</h3>
+                    <h3 className="font-black text-slate-800">سجل المبيعات (قاعدة البيانات)</h3>
                   </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-right border-collapse">
                       <thead>
                         <tr className="bg-slate-50 border-b border-slate-100">
+                          <th className="p-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">التاريخ</th>
+                          <th className="p-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">الإجراء</th>
                           <th className="p-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">الوحدة</th>
                           <th className="p-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">العميل</th>
-                          <th className="p-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">التصنيف</th>
-                          <th className="p-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">المساحة</th>
                           <th className="p-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-left">القيمة</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-50">
-                        {soldUnits.map(unit => (
-                          <tr key={unit.id} className="hover:bg-slate-50 transition-colors cursor-pointer" onClick={() => openUnitModal(unit)}>
-                            <td className="p-4 font-black">وحدة {unit.id}</td>
-                            <td className="p-4 font-bold text-slate-700">{unit.customerName || 'غير محدد'}</td>
-                            <td className="p-4"><span className="px-2 py-0.5 bg-slate-100 rounded text-[10px] font-black">تصنيف {unit.category}</span></td>
-                            <td className="p-4 font-medium text-slate-500">{unit.area} م²</td>
-                            <td className="p-4 text-left font-black text-primary">{unit.price?.toLocaleString()} IQD</td>
-                          </tr>
-                        ))}
+                        {salesLog.slice(0, 80).map((row) => {
+                          const u = unitById.get(row.plot_id)
+                          return (
+                            <tr
+                              key={row.id}
+                              className="hover:bg-slate-50 transition-colors cursor-pointer"
+                              onClick={() => u && openUnitModal(u)}
+                            >
+                              <td className="p-4 text-xs font-medium text-slate-500">
+                                {new Date(row.created_at).toLocaleString('ar-IQ')}
+                              </td>
+                              <td className="p-4 font-bold text-slate-700">{row.action}</td>
+                              <td className="p-4 font-black">{row.plot_id}</td>
+                              <td className="p-4 font-bold text-slate-700">{row.customer_name || '—'}</td>
+                              <td className="p-4 text-left font-black text-primary">
+                                {row.price != null ? `${Number(row.price).toLocaleString()} IQD` : '—'}
+                              </td>
+                            </tr>
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -449,35 +552,61 @@ export default function App() {
                   </div>
                   <div className="p-4 bg-white border border-slate-200 rounded-[24px] shadow-sm flex items-center gap-4">
                     <Bell className="text-amber-500" />
-                    <span className="font-black text-lg tabular-nums">{soldUnits.length}</span>
+                    <span className="font-black text-lg tabular-nums">{salesLog.length}</span>
                   </div>
                 </div>
 
                 <div className="space-y-4">
-                  {soldUnits.map((unit, idx) => (
-                    <motion.div 
-                      key={unit.id + idx}
-                      initial={{ opacity: 0, x: 20 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: idx * 0.05 }}
-                      className="bg-white p-6 rounded-[32px] border border-slate-200 shadow-sm flex items-center gap-6 hover:shadow-md transition-all cursor-pointer group"
-                      onClick={() => openUnitModal(unit)}
-                    >
-                      <div className="shrink-0 w-12 h-12 bg-primary/10 rounded-2xl flex items-center justify-center text-primary group-hover:bg-primary group-hover:text-white transition-colors">
-                        <CheckCircle2 size={24} />
-                      </div>
-                      <div className="flex-1">
-                        <div className="flex justify-between items-start mb-1">
-                          <h4 className="font-black text-slate-800">تم بيع الوحدة {unit.id}</h4>
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">منذ قليل</span>
+                  {salesLog.slice(0, 40).map((row, idx) => {
+                    const u = unitById.get(row.plot_id)
+                    const title =
+                      row.action === 'sold'
+                        ? `بيع: ${row.plot_id}`
+                        : row.action === 'reserved'
+                          ? `حجز: ${row.plot_id}`
+                          : row.action === 'released'
+                            ? `إلغاء حجز: ${row.plot_id}`
+                            : `تغيير سعر: ${row.plot_id}`
+                    return (
+                      <motion.div
+                        key={row.id}
+                        initial={{ opacity: 0, x: 20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: idx * 0.03 }}
+                        className="bg-white p-6 rounded-[32px] border border-slate-200 shadow-sm flex items-center gap-6 hover:shadow-md transition-all cursor-pointer group"
+                        onClick={() => u && openUnitModal(u)}
+                      >
+                        <div className="shrink-0 w-12 h-12 bg-primary/10 rounded-2xl flex items-center justify-center text-primary group-hover:bg-primary group-hover:text-white transition-colors">
+                          <CheckCircle2 size={24} />
                         </div>
-                        <p className="text-sm text-slate-500 font-medium leading-relaxed" dir="rtl">
-                          تم تسجيل الوحدة رقم <span className="font-bold text-slate-800">{unit.number}</span> في <span className="font-bold text-slate-800">{unit.block}</span> باسم <span className="font-black text-primary">{unit.customerName || 'عميل مجهول'}</span>.
-                        </p>
-                      </div>
-                    </motion.div>
-                  ))}
-                  {soldUnits.length === 0 && (
+                        <div className="flex-1">
+                          <div className="flex justify-between items-start mb-1">
+                            <h4 className="font-black text-slate-800">{title}</h4>
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                              {new Date(row.created_at).toLocaleString('ar-IQ')}
+                            </span>
+                          </div>
+                          <p className="text-sm text-slate-500 font-medium leading-relaxed" dir="rtl">
+                            {row.customer_name ? (
+                              <>
+                                العميل: <span className="font-black text-primary">{row.customer_name}</span>
+                                {row.price != null && (
+                                  <>
+                                    {' · '}
+                                    القيمة:{' '}
+                                    <span className="font-bold text-slate-800">{Number(row.price).toLocaleString()} IQD</span>
+                                  </>
+                                )}
+                              </>
+                            ) : (
+                              <span className="text-slate-400">—</span>
+                            )}
+                          </p>
+                        </div>
+                      </motion.div>
+                    )
+                  })}
+                  {salesLog.length === 0 && (
                     <div className="py-20 text-center text-slate-300">
                       <Bell size={48} className="mx-auto mb-4 opacity-20" />
                       <p className="font-black text-xl">لا توجد تنبيهات حالية</p>
@@ -493,8 +622,12 @@ export default function App() {
                    <div className="w-32 h-32 rounded-[40px] bg-white border-4 border-white shadow-2xl flex items-center justify-center text-primary mb-6 group overflow-hidden">
                      <UserIcon size={64} className="group-hover:scale-110 transition-transform" />
                    </div>
-                   <h2 className="text-4xl font-black text-slate-900 tracking-tight">{currentUser === UserRole.ADMIN ? 'أدمن مبيعات' : 'مندوب مبيعات'}</h2>
-                   <p className="text-slate-400 font-bold mb-8 uppercase tracking-widest text-xs">مشروع شط العرب السكني</p>
+                   <h2 className="text-4xl font-black text-slate-900 tracking-tight">
+                     {profile?.name || (isAdmin ? 'مدير' : 'مندوب')}
+                   </h2>
+                   <p className="text-slate-400 font-bold mb-2 uppercase tracking-widest text-xs">
+                     {isAdmin ? 'أدمن مبيعات' : 'مندوب مبيعات'}
+                   </p>
                    
                    <div className="w-full grid grid-cols-2 gap-4 mb-8">
                      <div className="p-6 bg-slate-50 rounded-[32px] border border-slate-100 flex flex-col items-center gap-2">
@@ -526,30 +659,31 @@ export default function App() {
                      </div>
                    </div>
 
-                   <button className="mt-12 text-red-500 font-black text-xs uppercase tracking-widest hover:bg-red-50 px-8 py-3 rounded-2xl transition-all">
+                   <button
+                     type="button"
+                    onClick={() => setSignOutConfirmOpen(true)}
+                     className="mt-12 text-red-500 font-black text-xs uppercase tracking-widest hover:bg-red-50 px-8 py-3 rounded-2xl transition-all"
+                   >
                      تسجيل الخروج من النظام
                    </button>
                 </div>
               </motion.div>
             ) : view === 'users' ? (
               <motion.div key="users" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 1.05 }} className="h-full overflow-y-auto p-12 flex flex-col gap-8">
-                <div className="flex justify-between items-center">
+                <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
                   <div>
                     <h2 className="text-4xl font-black text-slate-900 tracking-tight">موظفي المبيعات</h2>
-                    <p className="text-slate-400 font-bold mt-1 tracking-tight">إدارة صلاحيات فريق العمل للوصول إلى الخريطة والوحدات</p>
+                    <p className="text-slate-400 font-bold mt-1 tracking-tight">
+                      المستخدمون المسجّلون في نظام التوثيق السحابي. أضِف مندوبًا جديدًا من النموذج أدناه.
+                    </p>
                   </div>
-                  <button 
-                    onClick={() => setIsAddUserModalOpen(true)}
-                    className="px-8 py-4 bg-primary text-white rounded-[24px] font-black shadow-lg shadow-primary/20 hover:scale-105 transition-transform flex items-center gap-3"
-                  >
-                    <UserPlus size={20} />
-                    <span>إضافة مندوب جديد</span>
-                  </button>
                 </div>
 
+                <AddEmployeeForm onCreated={() => void reloadTeamProfiles()} />
+
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {users.map(user => (
-                    <motion.div 
+                  {teamProfiles.map((user) => (
+                    <motion.div
                       key={user.id}
                       layout
                       className="bg-white p-8 rounded-[40px] border border-slate-200 shadow-sm relative group overflow-hidden"
@@ -559,29 +693,49 @@ export default function App() {
                         <div className="w-16 h-16 rounded-2xl bg-white border-2 border-white shadow-xl flex items-center justify-center text-primary mb-4">
                           <UserIcon size={32} />
                         </div>
-                        <span className={`px-3 py-1 rounded-xl text-[10px] font-black uppercase ${user.role === UserRole.ADMIN ? 'bg-amber-100 text-amber-700' : 'bg-primary/10 text-primary'}`}>
-                          {user.role === UserRole.ADMIN ? 'مدير' : 'مندوب'}
+                        <span
+                          className={`px-3 py-1 rounded-xl text-[10px] font-black uppercase ${user.role === 'admin' ? 'bg-amber-100 text-amber-700' : 'bg-primary/10 text-primary'}`}
+                        >
+                          {user.role === 'admin' ? 'مدير' : 'مندوب'}
                         </span>
                       </div>
                       <div>
                         <h3 className="text-xl font-black text-slate-800">{user.name}</h3>
-                        <p className="text-sm font-medium text-slate-400">{user.email}</p>
                       </div>
-                      <div className="mt-8 pt-6 border-t border-slate-50 flex items-center justify-between">
-                         <span className="text-[10px] font-bold text-slate-300">تمت الإضافة {new Date(user.createdAt).toLocaleDateString()}</span>
-                         {user.id !== '1' && (
-                           <button 
-                             onClick={() => removeUser(user.id)}
-                             className="text-[10px] font-black text-red-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                           >حذف الموظف</button>
-                         )}
+                      <div className="mt-6 flex items-center gap-2">
+                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">الدور</span>
+                        <select
+                          value={user.role}
+                          disabled={user.id === profile?.id}
+                          onChange={async (e) => {
+                            const next = e.target.value as UserRole
+                            if (next === user.role) return
+                            setRoleChangeRequest({
+                              userId: user.id,
+                              userName: user.name,
+                              nextRole: next,
+                            })
+                          }}
+                          className="text-xs font-bold rounded-lg border border-slate-200 bg-white px-2 py-1 text-slate-700 outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50"
+                        >
+                          <option value="sales">مندوب</option>
+                          <option value="admin">مدير</option>
+                        </select>
+                        {user.id === profile?.id && (
+                          <span className="text-[10px] font-bold text-slate-300">(أنت)</span>
+                        )}
+                      </div>
+                      <div className="mt-6 pt-6 border-t border-slate-50">
+                        <span className="text-[10px] font-bold text-slate-300">
+                          تمت الإضافة {new Date(user.created_at).toLocaleDateString()}
+                        </span>
                       </div>
                     </motion.div>
                   ))}
                 </div>
               </motion.div>
             ) : view === 'settings' ? (
-              <motion.div key="settings" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 1.02 }} className="h-full overflow-hidden flex flex-col p-8 gap-6">
+              <motion.div key="settings" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 1.02 }} className="h-full min-h-0 overflow-y-auto flex flex-col p-8 gap-6">
                 <div className="flex items-center justify-between shrink-0">
                   <div>
                     <h2 className="text-3xl font-black text-slate-900 tracking-tight">إعدادات المشروع العام</h2>
@@ -589,7 +743,7 @@ export default function App() {
                   </div>
                   <div className="flex gap-3">
                     <button 
-                      onClick={() => { setConfigs(DEFAULT_CONFIGS); updateAllPrices(DEFAULT_CONFIGS); }}
+                      onClick={() => setResetDefaultsConfirmOpen(true)}
                       className="flex items-center gap-2 px-5 py-2.5 bg-slate-100 text-slate-600 rounded-2xl text-xs font-black hover:bg-slate-200 transition-all"
                     >
                       <RotateCcw size={16} />
@@ -617,7 +771,7 @@ export default function App() {
                             onChange={(e) => {
                               const newCfgs = { ...configs, [cat]: { ...configs[cat], basePrice: Number(e.target.value) } };
                               setConfigs(newCfgs);
-                              updateAllPrices(newCfgs);
+                              void updateAllPrices(newCfgs);
                             }}
                           />
                         </div>
@@ -631,7 +785,7 @@ export default function App() {
                               onChange={(e) => {
                                 const newCfgs = { ...configs, [cat]: { ...configs[cat], baseArea: Number(e.target.value) } };
                                 setConfigs(newCfgs);
-                                updateAllPrices(newCfgs);
+                                void updateAllPrices(newCfgs);
                               }}
                             />
                           </div>
@@ -644,7 +798,7 @@ export default function App() {
                               onChange={(e) => {
                                 const newCfgs = { ...configs, [cat]: { ...configs[cat], cornerPremium: Number(e.target.value) } };
                                 setConfigs(newCfgs);
-                                updateAllPrices(newCfgs);
+                                void updateAllPrices(newCfgs);
                               }}
                             />
                           </div>
@@ -654,7 +808,7 @@ export default function App() {
                   ))}
                 </div>
 
-                <div className="flex-1 bg-white rounded-[40px] border border-slate-200 shadow-2xl overflow-hidden flex flex-col">
+                <div className="flex min-h-[min(65vh,900px)] flex-1 flex-col overflow-hidden rounded-[40px] border border-slate-200 bg-white shadow-2xl">
                   <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
                     <span className="text-xs font-black text-slate-800 uppercase tracking-tight">معاينة قائمة الوحدات المحدثة</span>
                     <div className="flex bg-white rounded-xl p-1 border border-slate-200 shadow-sm scale-90 origin-left">
@@ -663,7 +817,7 @@ export default function App() {
                       ))}
                     </div>
                   </div>
-                  <div className="overflow-x-auto flex-1">
+                  <div className="min-h-0 flex-1 overflow-y-auto overflow-x-auto">
                     <table className="w-full text-right border-collapse">
                       <thead>
                         <tr className="bg-slate-50 border-b border-slate-100 sticky top-0 z-10">
@@ -705,7 +859,7 @@ export default function App() {
                                       e.stopPropagation();
                                       const val = Number(tempPriceInTable);
                                       if (!isNaN(val)) {
-                                        updateUnitPrice(unit.id, val);
+                                        void updateUnitPrice(unit.id, val);
                                         setEditingUnitIdInTable(null);
                                       }
                                     }}
@@ -883,7 +1037,7 @@ export default function App() {
                         onClick={() => {
                           const val = Number(tempPrice);
                           if (!isNaN(val)) {
-                            updateUnitPrice(selectedUnit.id, val);
+                            void updateUnitPrice(selectedUnit.id, val);
                             setIsEditingPrice(false);
                             setSelectedUnit({ ...selectedUnit, price: val });
                           }
@@ -907,7 +1061,7 @@ export default function App() {
                           <span className="text-slate-400">—</span>
                         )}
                       </p>
-                      {currentUser === UserRole.ADMIN && (
+                      {isAdmin && (
                         <button 
                           onClick={() => {
                             setTempPrice(selectedUnit.price || 0);
@@ -981,14 +1135,14 @@ export default function App() {
                   <div className="flex gap-3">
                     <button 
                       onClick={() => { 
-                        handleBooking(selectedUnit.id, UnitStatus.SOLD, bookingName, bookingNote);
+                        void handleBooking(selectedUnit.id, UnitStatus.SOLD, bookingName, bookingNote);
                         setSelectedUnit(null); 
                       }} 
                       className="flex-1 py-5 rounded-3xl bg-primary text-white font-black text-lg shadow-xl shadow-primary/20 hover:bg-primary transition-all"
                     >تأكيد الحجز النهائي</button>
                     <button 
                       onClick={() => { 
-                        handleBooking(selectedUnit.id, UnitStatus.RESERVED, bookingName, bookingNote, reservationDuration);
+                        void handleBooking(selectedUnit.id, UnitStatus.RESERVED, bookingName, bookingNote, reservationDuration);
                         setSelectedUnit(null); 
                       }} 
                       className="flex-1 py-5 rounded-3xl bg-amber-500 text-white font-black text-lg shadow-xl shadow-amber-200 hover:bg-amber-600 transition-all"
@@ -997,7 +1151,7 @@ export default function App() {
                 ) : (
                   <button 
                     onClick={() => { 
-                      handleBooking(selectedUnit.id, UnitStatus.AVAILABLE);
+                      void handleBooking(selectedUnit.id, UnitStatus.AVAILABLE);
                       setSelectedUnit(null); 
                     }} 
                     className="w-full py-5 rounded-3xl bg-slate-100 text-slate-700 font-black text-lg hover:bg-slate-200 transition-all"
@@ -1018,61 +1172,44 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+      <ConfirmDialog
+        open={signOutConfirmOpen}
+        title="تأكيد تسجيل الخروج"
+        message="سيتم إنهاء جلستك الحالية والعودة إلى صفحة تسجيل الدخول."
+        confirmLabel="تسجيل الخروج"
+        cancelLabel="إلغاء"
+        confirmVariant="danger"
+        confirmLoading={signOutActionLoading}
+        onConfirm={() => void handleConfirmSignOut()}
+        onCancel={() => setSignOutConfirmOpen(false)}
+      />
+      <ConfirmDialog
+        open={resetDefaultsConfirmOpen}
+        title="استعادة الإعدادات الافتراضية"
+        message="سيتم تحديث أسعار ومساحات الفئات A/B/C في الخريطة الحالية بالقيم الافتراضية."
+        confirmLabel="استعادة"
+        cancelLabel="إلغاء"
+        confirmVariant="amber"
+        confirmLoading={resetDefaultsLoading}
+        onConfirm={() => void handleConfirmResetDefaults()}
+        onCancel={() => setResetDefaultsConfirmOpen(false)}
+      />
+      <ConfirmDialog
+        open={roleChangeRequest !== null}
+        title="تأكيد تغيير الصلاحية"
+        message={
+          roleChangeRequest
+            ? `سيتم تغيير دور ${roleChangeRequest.userName} إلى ${roleChangeRequest.nextRole === 'admin' ? 'مدير' : 'مندوب'}.`
+            : ''
+        }
+        confirmLabel="تأكيد التغيير"
+        cancelLabel="إلغاء"
+        confirmVariant="amber"
+        confirmLoading={roleChangeLoading}
+        onConfirm={() => void handleConfirmRoleChange()}
+        onCancel={() => setRoleChangeRequest(null)}
+      />
 
-      <AnimatePresence>
-        {isAddUserModalOpen && (
-          <div className="fixed inset-0 z-[200] flex items-center justify-center p-6 bg-slate-900/60 backdrop-blur-md">
-            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} className="relative bg-white w-full max-w-md rounded-[40px] p-10 shadow-2xl flex flex-col gap-6">
-              <h3 className="text-3xl font-black text-slate-900">إضافة موظف مبيعات</h3>
-              <div className="space-y-4 text-right">
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">الاسم الكامل</label>
-                  <input 
-                    type="text" 
-                    className="w-full bg-slate-50 border border-slate-100 rounded-2xl px-5 py-3 font-bold text-slate-700 outline-none focus:ring-2 focus:ring-primary/20"
-                    placeholder="اسم المندوب..."
-                    value={newUserName}
-                    onChange={(e) => setNewUserName(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">البريد الإلكتروني</label>
-                  <input 
-                    type="email" 
-                    className="w-full bg-slate-50 border border-slate-100 rounded-2xl px-5 py-3 font-bold text-slate-700 outline-none focus:ring-2 focus:ring-primary/20"
-                    placeholder="email@example.com"
-                    value={newUserEmail}
-                    onChange={(e) => setNewUserEmail(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">الدور الوظيفي</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button 
-                      onClick={() => setNewUserRole(UserRole.SALES)}
-                      className={`py-3 rounded-2xl font-black text-xs border-2 transition-all ${newUserRole === UserRole.SALES ? 'border-primary bg-primary/5 text-primary' : 'border-slate-100 text-slate-400'}`}
-                    >مندوب مبيعات</button>
-                    <button 
-                      onClick={() => setNewUserRole(UserRole.ADMIN)}
-                      className={`py-3 rounded-2xl font-black text-xs border-2 transition-all ${newUserRole === UserRole.ADMIN ? 'border-primary bg-primary/5 text-primary' : 'border-slate-100 text-slate-400'}`}
-                    >مدير مبيعات</button>
-                  </div>
-                </div>
-              </div>
-              <div className="flex gap-3 mt-4">
-                <button 
-                  onClick={handleAddUser}
-                  className="flex-1 py-4 bg-primary text-white rounded-2xl font-black shadow-lg shadow-primary/20 hover:bg-primary transition-colors"
-                >إرسال دعوة</button>
-                <button 
-                  onClick={() => setIsAddUserModalOpen(false)}
-                  className="px-6 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black hover:bg-slate-200 transition-colors"
-                >إلغاء</button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
     </div>
   );
 }
@@ -1138,5 +1275,145 @@ function LegendItem({ color, label }: any) {
       <div className={`w-4 h-4 rounded-lg shadow-sm border border-slate-200/50 ${color}`} />
       <span className="text-[11px] font-bold text-slate-500 tracking-tight uppercase">{label}</span>
     </div>
+  );
+}
+
+function AddEmployeeForm({ onCreated }: { onCreated: () => void }) {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [role, setRole] = useState<UserRole>('sales');
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+    setPending(true);
+    try {
+      const res = await createEmployee({ email, password, name, role });
+      if (res.ok) {
+        setSuccess('تمت إضافة الموظف بنجاح.');
+        setName('');
+        setEmail('');
+        setPassword('');
+        setRole('sales');
+        onCreated();
+      } else {
+        setError(res.error);
+      }
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <form
+      onSubmit={submit}
+      className="bg-white rounded-[32px] border border-slate-200 shadow-sm p-8 space-y-5"
+    >
+      <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
+        <div className="p-2 bg-primary/10 rounded-2xl text-primary">
+          <UserPlus size={20} />
+        </div>
+        <div>
+          <h3 className="text-lg font-black text-slate-800">إضافة موظف جديد</h3>
+          <p className="text-[11px] font-bold text-slate-400">سيُنشأ حساب جديد في نظام التوثيق السحابي ويرتبط بالدور تلقائيًا.</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">الاسم الكامل</label>
+          <input
+            type="text"
+            required
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-primary/30"
+            autoComplete="off"
+          />
+        </div>
+        <div>
+          <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">البريد الإلكتروني</label>
+          <input
+            type="email"
+            required
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-primary/30"
+            autoComplete="off"
+          />
+        </div>
+        <div>
+          <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">كلمة المرور</label>
+          <div className="relative">
+            <input
+              type={showPassword ? 'text' : 'password'}
+              required
+              minLength={6}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full rounded-xl border border-slate-200 ps-12 pe-4 py-3 text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-primary/30"
+              autoComplete="new-password"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword((v) => !v)}
+              aria-label={showPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
+              aria-pressed={showPassword}
+              className="absolute inset-y-0 start-0 flex items-center justify-center w-10 text-slate-400 hover:text-slate-700 focus:outline-none rounded-xl"
+            >
+              {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+            </button>
+          </div>
+        </div>
+        <div>
+          <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">الدور</label>
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value as UserRole)}
+            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-primary/30"
+          >
+            <option value="sales">مندوب مبيعات</option>
+            <option value="admin">مدير</option>
+          </select>
+        </div>
+      </div>
+
+      {error && (
+        <p className="text-sm font-bold text-rose-600 bg-rose-50 border border-rose-100 rounded-xl px-4 py-3">
+          {error}
+        </p>
+      )}
+      {success && (
+        <p className="text-sm font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3">
+          {success}
+        </p>
+      )}
+
+      <div className="flex justify-end">
+        <button
+          type="submit"
+          disabled={pending}
+          className="inline-flex items-center justify-center gap-2 rounded-2xl bg-primary px-6 py-3 text-sm font-black text-white shadow-lg shadow-primary/20 hover:opacity-95 disabled:opacity-50"
+        >
+          {pending ? (
+            <>
+              <LoadingSpinner size="sm" className="border-white/25 border-t-white" label="جاري إضافة الموظف" />
+              جاري الإضافة…
+            </>
+          ) : (
+            <>
+              <UserPlus size={16} />
+              إضافة الموظف
+            </>
+          )}
+        </button>
+      </div>
+    </form>
   );
 }

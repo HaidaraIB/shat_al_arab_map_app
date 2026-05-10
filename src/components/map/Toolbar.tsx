@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import type { ComponentTransform } from '../../types/map'
+import { ConfirmDialog } from './ConfirmDialog'
 
 type Props = {
   componentTransform: ComponentTransform
@@ -36,9 +37,13 @@ type Props = {
   onUndo: () => void
   onRedo: () => void
   onExportDisk: () => void
-  /** Writes current map to repo `public/map-default.json` via dev server (see confirmation in handler). */
-  onSaveDefaultToProject: () => void
+  onPublishDesign: () => void
   onImportDisk: () => void
+  /** Destructive: rewrites plot_state from current map; opens RESET confirm in parent. */
+  onReseedPlotState: () => void
+  isAdmin: boolean
+  /** When true, publish/reseed in toolbar are hidden (import preview banner handles publish). */
+  previewMode?: boolean
   onZoomIn: () => void
   onZoomOut: () => void
   onFitView: () => void
@@ -85,8 +90,11 @@ export function Toolbar({
   onUndo,
   onRedo,
   onExportDisk,
-  onSaveDefaultToProject,
+  onPublishDesign,
   onImportDisk,
+  onReseedPlotState,
+  isAdmin,
+  previewMode = false,
   onZoomIn,
   onZoomOut,
   onFitView,
@@ -106,6 +114,12 @@ export function Toolbar({
   const [deleteRow, setDeleteRow] = useState(1)
   const [deleteCol, setDeleteCol] = useState(1)
   const [selectedPlotDraft, setSelectedPlotDraft] = useState('')
+  const [pendingAction, setPendingAction] = useState<null | {
+    title: string
+    message: string
+    confirmLabel: string
+    run: () => void
+  }>(null)
   const t = componentTransform
 
   const addFormStats = useMemo(() => {
@@ -159,11 +173,12 @@ export function Toolbar({
   }
 
   return (
-    <div className="map-toolbar absolute top-4 bottom-4 start-4 z-20 max-w-[280px]">
-      <div
-        className="h-full overflow-y-scroll overscroll-contain rounded-2xl bg-white/95 shadow-xl border border-slate-200/80 backdrop-blur-md p-3 space-y-3 pointer-events-auto [scrollbar-gutter:stable] [scrollbar-width:thin]"
-        onWheel={handleWheelScroll}
-      >
+    <>
+      <div className="map-toolbar absolute top-4 bottom-4 start-4 z-20 max-w-[280px]">
+        <div
+          className="h-full overflow-y-scroll overscroll-contain rounded-2xl bg-white/95 shadow-xl border border-slate-200/80 backdrop-blur-md p-3 space-y-3 pointer-events-auto [scrollbar-gutter:stable] [scrollbar-width:thin]"
+          onWheel={handleWheelScroll}
+        >
         <div className="flex items-start justify-between gap-2">
           <div>
             <p className="text-[11px] font-bold text-slate-700 leading-snug">جارٍ السحب للتحريك · العجلة للتكبير والتصغير</p>
@@ -228,20 +243,33 @@ export function Toolbar({
           >
             تصدير ملف
           </button>
-          <button
-            type="button"
-            onClick={onSaveDefaultToProject}
-            className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-900 hover:bg-amber-100"
-          >
-           حفظ كتصميم افتراضي
-          </button>
-          <button
-            type="button"
-            onClick={onImportDisk}
-            className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
-          >
-            استيراد ملف
-          </button>
+          {isAdmin && !previewMode && (
+            <>
+              <button
+                type="button"
+                onClick={onPublishDesign}
+                className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-900 hover:bg-amber-100"
+              >
+                نشر التصميم
+              </button>
+              <button
+                type="button"
+                onClick={onReseedPlotState}
+                className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-900 hover:bg-rose-100"
+              >
+                إعادة حالات
+              </button>
+            </>
+          )}
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={onImportDisk}
+              className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
+            >
+              استيراد ملف
+            </button>
+          )}
         </div>
 
         <div className="border-t border-slate-100 pt-2 space-y-2">
@@ -354,7 +382,14 @@ export function Toolbar({
             <div className="grid grid-cols-2 gap-1">
               <button
                 type="button"
-                onClick={onDeleteSelected}
+                onClick={() =>
+                  setPendingAction({
+                    title: 'حذف العناصر المحددة',
+                    message: 'سيتم حذف كل العناصر المحددة من التصميم الحالي.',
+                    confirmLabel: 'حذف',
+                    run: onDeleteSelected,
+                  })
+                }
                 disabled={!hasSelection}
                 className="rounded-lg border border-rose-200 bg-rose-50 py-1.5 text-[11px] font-bold text-rose-700 hover:bg-rose-100 disabled:opacity-40"
               >
@@ -444,7 +479,15 @@ export function Toolbar({
                   />
                   <button
                     type="button"
-                    onClick={() => newPlotBlockId && onDeleteBlockRow(newPlotBlockId, deleteRow)}
+                    onClick={() => {
+                      if (!newPlotBlockId) return
+                      setPendingAction({
+                        title: 'حذف صف من البلوك',
+                        message: `سيتم حذف الصف ${deleteRow} من ${newPlotBlockId} مع كل خلاياه.`,
+                        confirmLabel: 'حذف الصف',
+                        run: () => onDeleteBlockRow(newPlotBlockId, deleteRow),
+                      })
+                    }}
                     className="rounded-md border border-rose-200 bg-rose-50 py-1 text-[11px] font-bold text-rose-700 hover:bg-rose-100"
                   >
                     حذف صف
@@ -460,7 +503,15 @@ export function Toolbar({
                   />
                   <button
                     type="button"
-                    onClick={() => newPlotBlockId && onDeleteBlockCol(newPlotBlockId, deleteCol)}
+                    onClick={() => {
+                      if (!newPlotBlockId) return
+                      setPendingAction({
+                        title: 'حذف عمود من البلوك',
+                        message: `سيتم حذف العمود ${deleteCol} من ${newPlotBlockId} مع كل خلاياه.`,
+                        confirmLabel: 'حذف العمود',
+                        run: () => onDeleteBlockCol(newPlotBlockId, deleteCol),
+                      })
+                    }}
                     className="rounded-md border border-rose-200 bg-rose-50 py-1 text-[11px] font-bold text-rose-700 hover:bg-rose-100"
                   >
                     حذف عمود
@@ -545,7 +596,14 @@ export function Toolbar({
                   </button>
                   <button
                     type="button"
-                    onClick={onDeleteSelectedPlot}
+                    onClick={() =>
+                      setPendingAction({
+                        title: 'حذف الخلية المحددة',
+                        message: 'سيتم حذف هذه الخلية من المخطط الحالي نهائيًا.',
+                        confirmLabel: 'حذف',
+                        run: onDeleteSelectedPlot,
+                      })
+                    }
                     className="rounded-lg border border-rose-200 bg-rose-50 py-1.5 text-[11px] font-bold text-rose-700 hover:bg-rose-100"
                   >
                     حذف الخلية
@@ -649,7 +707,22 @@ export function Toolbar({
             </span>
           </label>
         </div>
+        </div>
       </div>
-    </div>
+      <ConfirmDialog
+        open={pendingAction !== null}
+        title={pendingAction?.title ?? ''}
+        message={pendingAction?.message ?? ''}
+        confirmLabel={pendingAction?.confirmLabel ?? 'تأكيد'}
+        cancelLabel="إلغاء"
+        confirmVariant="danger"
+        onConfirm={() => {
+          if (!pendingAction) return
+          pendingAction.run()
+          setPendingAction(null)
+        }}
+        onCancel={() => setPendingAction(null)}
+      />
+    </>
   )
 }

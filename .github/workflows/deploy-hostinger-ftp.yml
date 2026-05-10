@@ -1,14 +1,16 @@
-# Deploy built static files to Hostinger over FTP.
+# Deploy Supabase migrations and the built static frontend to Hostinger over FTP.
 #
 # Repository secrets (Settings → Secrets and variables → Actions):
-#   FTP_SERVER             — Hostinger FTP hostname (e.g. ftp.yourdomain.com from hPanel → Files → FTP Accounts)
-#   FTP_USERNAME           — FTP user
-#   FTP_PASSWORD           — FTP password
-#   VITE_MAP_SAVE_TOKEN    — Same value as MAP_SAVE_TOKEN on Hostinger (or the token in save-map-default.php).
-#                            Required for the “save default map” button on production; embedded at build time.
+#   FTP_SERVER              — Hostinger FTP hostname (e.g. ftp.yourdomain.com from hPanel → Files → FTP Accounts)
+#   FTP_USERNAME            — FTP user
+#   FTP_PASSWORD            — FTP password
 #
-# Optional repository variables (Settings → Variables → Actions):
-#   VITE_MAP_DISABLE_LOCAL_STORAGE — set to `true` if you want file-only map persistence (no localStorage).
+#   VITE_SUPABASE_URL       — Your Supabase project URL (https://<ref>.supabase.co). Embedded at build time.
+#   VITE_SUPABASE_ANON_KEY  — Your Supabase anon/public key. Embedded at build time.
+#
+#   SUPABASE_ACCESS_TOKEN   — Personal access token from https://supabase.com/dashboard/account/tokens
+#   SUPABASE_PROJECT_REF    — Your project ref (the <ref> part of <ref>.supabase.co)
+#   SUPABASE_DB_PASSWORD    — Database password from Project Settings → Database
 #
 # If Hostinger requires FTPS or a non-default port, add under "with:" on the deploy step, for example:
 #   protocol: ftps
@@ -16,17 +18,48 @@
 #
 # Adjust server-dir below if your site lives in a subdomain folder (e.g. /public_html/subdomain).
 
-name: Deploy to Hostinger (FTP)
+name: Deploy (Supabase + Hostinger FTP)
 
 on:
   push:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      skip_migrations:
+        description: "Skip running supabase db push (deploy frontend only)"
+        type: boolean
+        default: false
 
 jobs:
-  deploy:
+  db-migrate:
+    name: Push Supabase migrations
     runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_migrations }}
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link Supabase project
+        run: supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+
+      - name: Push migrations
+        run: supabase db push
+
+  deploy:
+    name: Build and deploy to Hostinger
+    runs-on: ubuntu-latest
+    needs: db-migrate
+    # Run deploy even when db-migrate was skipped (e.g. workflow_dispatch with skip_migrations=true).
+    if: ${{ always() && (needs.db-migrate.result == 'success' || needs.db-migrate.result == 'skipped') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,13 +72,13 @@ jobs:
 
       - name: Install and build
         env:
-          VITE_MAP_SAVE_TOKEN: ${{ secrets.VITE_MAP_SAVE_TOKEN }}
-          VITE_MAP_DISABLE_LOCAL_STORAGE: ${{ vars.VITE_MAP_DISABLE_LOCAL_STORAGE }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
         run: |
           npm ci
           npm run build
 
-      # dist/ includes index.html, assets/, and map-default.json (copied from public/ by Vite — site root URL /map-default.json).
+      # dist/ contains the SPA (index.html + assets/ + map-default.json seed).
       - name: Deploy to Hostinger via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.6
         with:

@@ -1,13 +1,15 @@
-import {StrictMode} from 'react';
-import {createRoot} from 'react-dom/client';
-import App from './App.tsx';
-import './index.css';
-import { bootstrapPublicMap } from './store/mapStore';
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import App from './App.tsx'
+import './index.css'
+import { AuthProvider, RequireAuth } from './lib/auth.tsx'
 
-void bootstrapPublicMap().finally(() => {
-  createRoot(document.getElementById('root')!).render(
-    <StrictMode>
-      <App />
-    </StrictMode>,
-  );
-});
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <AuthProvider>
+      <RequireAuth>
+        <App />
+      </RequireAuth>
+    </AuthProvider>
+  </StrictMode>,
+)

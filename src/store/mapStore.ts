@@ -23,6 +23,19 @@ import {
   translatePolygon,
 } from '../utils/geometry'
 import { publicInitialMapUrl } from '../config/publicMap'
+import { isSupabaseConfigured } from '../lib/supabase'
+import {
+  fetchRemoteMapBundle,
+  fetchSeedMapFromPublic,
+  getPlotRealtimePreviewMode,
+  mergeDesignAndPlotStates,
+  publishDesignRemote,
+  reseedPlotStateRemote,
+  setPlotRealtimePreviewMode,
+  subscribePlotStateRealtime,
+} from '../lib/mapRemote'
+import type { PlotStateRow } from '../utils/mapSupabaseSync'
+import { mergePlotStateIntoMap } from '../utils/mapSupabaseSync'
 
 /** After grid resize, recompute each plot polygon so cell size matches the block quad (fixes stretched/misaligned units). */
 function remapPlotsToBlockGrid(plots: Plot[], blockId: string, quad: Point[], rows: number, cols: number): Plot[] {
@@ -144,6 +157,9 @@ function emptyMapData(): MapData {
 let cachedPublicMap: MapData | null = null
 
 function resolveInitialMap(): MapData {
+  if (isSupabaseConfigured()) {
+    return withInitializedZIndex(emptyMapData())
+  }
   const defaultDesign = readStoredMap(MAP_DEFAULT_STORAGE_KEY)
   const workingDesign = readStoredMap(MAP_WORKING_STORAGE_KEY)
   return withInitializedZIndex(cloneMap(workingDesign ?? defaultDesign ?? emptyMapData()))
@@ -244,8 +260,13 @@ type MapState = {
   importMap: (data: MapData) => void
   exportMap: () => string
   resetToDemo: () => void
+  /** @deprecated use publishDesign */
   saveCurrentAsDefault: () => void
   loadDefaultDesign: () => void
+  previewMode: boolean
+  setPreviewMode: (on: boolean) => void
+  publishDesign: () => Promise<{ error: string | null }>
+  reseedPlotState: () => Promise<{ error: string | null }>
   /** Align plot colors with dashboard unit records (same plot id as unit id). */
   syncPlotStatusesFromLegacyData: (blocks: LegacyBlock[]) => void
 
@@ -288,6 +309,14 @@ const HISTORY_LIMIT = 200
 let undoStack: MapData[] = []
 let redoStack: MapData[] = []
 let historyPaused = false
+let unsubPlotRealtime: (() => void) | null = null
+
+function applyPlotStateRowToStore(row: PlotStateRow) {
+  if (getPlotRealtimePreviewMode()) return
+  useMapStore.setState((s) => ({
+    map: mergePlotStateIntoMap(s.map, [row]),
+  }))
+}
 
 export const useMapStore = create<MapState>((set, get) => ({
   map: resolveInitialMap(),
@@ -303,6 +332,12 @@ export const useMapStore = create<MapState>((set, get) => ({
   snapGrid: 0,
   viewport: { scale: 1, positionX: 0, positionY: 0 },
   selectedComponentKeys: [],
+  previewMode: false,
+
+  setPreviewMode: (on) => {
+    setPlotRealtimePreviewMode(on)
+    set(() => ({ previewMode: on }))
+  },
 
   setViewport: (v) =>
     set((s) => ({
@@ -404,31 +439,48 @@ export const useMapStore = create<MapState>((set, get) => ({
 
   exportMap: () => JSON.stringify(get().map, null, 2),
 
-  resetToDemo: () =>
-    set(() => ({
-      map: resolveDefaultMap(),
-      selectedPlotId: null,
-      plotSelectionOpensUnitModal: false,
-      hoveredPlotId: null,
-      drawing: { mode: 'idle' },
-      selectedComponentKeys: [],
-    })),
-
-  saveCurrentAsDefault: () => {
-    const m = cloneMap(get().map)
-    writeStoredMap(MAP_DEFAULT_STORAGE_KEY, m)
-    writeStoredMap(MAP_WORKING_STORAGE_KEY, m)
+  resetToDemo: () => {
+    void (async () => {
+      const seed = await fetchSeedMapFromPublic()
+      if (!seed) return
+      const base = withInitializedZIndex(cloneMap(seed))
+      let merged = base
+      if (isSupabaseConfigured()) {
+        const bundle = await fetchRemoteMapBundle()
+        if (!bundle.error) {
+          merged = mergeDesignAndPlotStates(base, bundle.plotStates)
+        }
+      }
+      historyPaused = true
+      useMapStore.setState({
+        map: merged,
+        selectedPlotId: null,
+        plotSelectionOpensUnitModal: false,
+        hoveredPlotId: null,
+        drawing: { mode: 'idle' },
+        selectedComponentKeys: [],
+        previewMode: false,
+      })
+      lastMapSnapshot = cloneMap(merged)
+      undoStack = []
+      redoStack = []
+      historyPaused = false
+      useMapStore.setState({ canUndo: false, canRedo: false })
+      setPlotRealtimePreviewMode(false)
+    })()
   },
 
-  loadDefaultDesign: () =>
-    set(() => ({
-      map: resolveDefaultMap(),
-      selectedPlotId: null,
-      plotSelectionOpensUnitModal: false,
-      hoveredPlotId: null,
-      drawing: { mode: 'idle' },
-      selectedComponentKeys: [],
-    })),
+  saveCurrentAsDefault: () => {
+    void get().publishDesign()
+  },
+
+  loadDefaultDesign: () => {
+    void reloadMapFromServer()
+  },
+
+  publishDesign: async () => publishDesignRemote(get().map),
+
+  reseedPlotState: async () => reseedPlotStateRemote(get().map),
 
   syncPlotStatusesFromLegacyData: (blocks) => {
     const statusByPlotId = new Map<string, Plot['status']>()
@@ -802,7 +854,9 @@ useMapStore.setState({
 
 let lastMapSnapshot = cloneMap(useMapStore.getState().map)
 useMapStore.subscribe((state) => {
-  writeStoredMap(MAP_WORKING_STORAGE_KEY, state.map)
+  if (!isSupabaseConfigured()) {
+    writeStoredMap(MAP_WORKING_STORAGE_KEY, state.map)
+  }
   if (historyPaused) return
   const changed = JSON.stringify(state.map) !== JSON.stringify(lastMapSnapshot)
   if (!changed) return
@@ -815,27 +869,55 @@ useMapStore.subscribe((state) => {
   }
 })
 
-/** Load `public/map-default.json` once; hydrate store if there is no saved working/default design. */
-export async function bootstrapPublicMap(): Promise<void> {
-  try {
-    const res = await fetch(publicInitialMapUrl(), { cache: 'no-store' })
-    if (!res.ok) {
-      console.warn(`[map] Initial map file missing (${res.status}):`, publicInitialMapUrl())
-      return
-    }
-    const data = (await res.json()) as MapData
-    cachedPublicMap = withInitializedZIndex(cloneMap(data))
-  } catch (e) {
-    console.warn('[map] Failed to load initial map JSON from public folder:', e)
+/** Reload merged map from cloud backend (or local default when cloud mode is off). Clears import preview. */
+export async function reloadMapFromServer(): Promise<void> {
+  if (!isSupabaseConfigured()) {
+    historyPaused = true
+    const m = resolveDefaultMap()
+    useMapStore.setState({
+      map: m,
+      canUndo: false,
+      canRedo: false,
+      selectedPlotId: null,
+      plotSelectionOpensUnitModal: false,
+      hoveredPlotId: null,
+      selectedComponentKeys: [],
+      drawing: { mode: 'idle' },
+      previewMode: false,
+    })
+    lastMapSnapshot = cloneMap(m)
+    undoStack = []
+    redoStack = []
+    historyPaused = false
+    setPlotRealtimePreviewMode(false)
+    return
   }
 
-  const hasSaved = !!(readStoredMap(MAP_WORKING_STORAGE_KEY) || readStoredMap(MAP_DEFAULT_STORAGE_KEY))
-  if (hasSaved || !cachedPublicMap) return
+  const bundle = await fetchRemoteMapBundle()
+  if (bundle.error) {
+    console.warn('[map] reload:', bundle.error)
+    return
+  }
+
+  let design = bundle.design
+  if (!design) {
+    const seed = await fetchSeedMapFromPublic()
+    if (seed) {
+      design = withInitializedZIndex(cloneMap(seed))
+      cachedPublicMap = cloneMap(design)
+    }
+  } else {
+    design = withInitializedZIndex(cloneMap(design))
+    cachedPublicMap = cloneMap(design)
+  }
+
+  if (!design) return
+
+  const merged = mergeDesignAndPlotStates(design, bundle.plotStates)
 
   historyPaused = true
-  const m = cloneMap(cachedPublicMap)
   useMapStore.setState({
-    map: m,
+    map: merged,
     canUndo: false,
     canRedo: false,
     selectedPlotId: null,
@@ -843,9 +925,59 @@ export async function bootstrapPublicMap(): Promise<void> {
     hoveredPlotId: null,
     selectedComponentKeys: [],
     drawing: { mode: 'idle' },
+    previewMode: false,
   })
-  lastMapSnapshot = cloneMap(m)
+  lastMapSnapshot = cloneMap(merged)
   undoStack = []
   redoStack = []
   historyPaused = false
+  setPlotRealtimePreviewMode(false)
+}
+
+/** Load map from cloud backend after login, or legacy public JSON + localStorage. */
+export async function bootstrapPublicMap(): Promise<void> {
+  if (!isSupabaseConfigured()) {
+    try {
+      const res = await fetch(publicInitialMapUrl(), { cache: 'no-store' })
+      if (!res.ok) {
+        console.warn(`[map] Initial map file missing (${res.status}):`, publicInitialMapUrl())
+        return
+      }
+      const data = (await res.json()) as MapData
+      cachedPublicMap = withInitializedZIndex(cloneMap(data))
+    } catch (e) {
+      console.warn('[map] Failed to load initial map JSON from public folder:', e)
+    }
+
+    const hasSaved = !!(readStoredMap(MAP_WORKING_STORAGE_KEY) || readStoredMap(MAP_DEFAULT_STORAGE_KEY))
+    if (hasSaved || !cachedPublicMap) return
+
+    historyPaused = true
+    const m = cloneMap(cachedPublicMap)
+    useMapStore.setState({
+      map: m,
+      canUndo: false,
+      canRedo: false,
+      selectedPlotId: null,
+      plotSelectionOpensUnitModal: false,
+      hoveredPlotId: null,
+      selectedComponentKeys: [],
+      drawing: { mode: 'idle' },
+    })
+    lastMapSnapshot = cloneMap(m)
+    undoStack = []
+    redoStack = []
+    historyPaused = false
+    return
+  }
+
+  await reloadMapFromServer()
+
+  if (unsubPlotRealtime) {
+    unsubPlotRealtime()
+    unsubPlotRealtime = null
+  }
+  unsubPlotRealtime = subscribePlotStateRealtime((row) => {
+    applyPlotStateRowToStore(row)
+  })
 }

@@ -12,15 +12,9 @@ export function verifyMapDefaultCopied(): Plugin {
     closeBundle() {
       const root = path.resolve(process.cwd(), 'dist')
       const mapJson = path.join(root, 'map-default.json')
-      const savePhp = path.join(root, 'save-map-default.php')
       if (!fs.existsSync(mapJson)) {
         this.warn(
-          '[map-default] dist/map-default.json غير موجود بعد البناء. أضف الملف إلى مجلد public قبل npm run build — فيته يُنسخ إلى جذر dist مع index.html.',
-        )
-      }
-      if (!fs.existsSync(savePhp)) {
-        this.warn(
-          '[map-default] dist/save-map-default.php غير موجود — أضف public/save-map-default.php للحفظ على الخادم.',
+          '[map-default] dist/map-default.json missing after build. Add public/map-default.json before npm run build.',
         )
       }
     },

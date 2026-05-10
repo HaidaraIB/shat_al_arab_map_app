@@ -3,7 +3,7 @@
 
 @theme {
   --font-sans: "Almarai", ui-sans-serif, system-ui, sans-serif;
-  --color-primary: #1f4b3a;
+  --color-primary: #4f46e5;
 }
 
 body {
@@ -12,7 +12,7 @@ body {
 }
 
 .sold-gradient {
-  background: #1f4b3a;
+  background: #4f46e5;
 }
 
 .available-shadow {

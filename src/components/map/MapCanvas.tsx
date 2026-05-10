@@ -22,9 +22,10 @@ import { categoryForNewPlotInBlock } from '../../utils/legacyBlocksFromMap'
 import { Label } from './Label'
 import { PlotPolygon } from './PlotPolygon'
 import { RoadPath } from './RoadPath'
-import { productionSaveMapDefaultUrl, publicInitialMapUrl, saveMapDefaultApiUrl } from '../../config/publicMap'
 import { ConfirmDialog } from './ConfirmDialog'
 import { Toolbar } from './Toolbar'
+import { useAuth } from '../../lib/auth'
+import { reloadMapFromServer } from '../../store/mapStore'
 
 function facilityFill(kind: Facility['kind']): string {
   switch (kind) {
@@ -315,12 +316,17 @@ function computeBlockAddStats(block: Block, allPlots: Plot[]) {
  * Roads, facilities, and A/B/C block tables — each selectable/draggable; Ctrl+click multi-select.
  */
 export function MapCanvas() {
+  const { isAdmin } = useAuth()
   const transformRef = useRef<ReactZoomPanPinchRef>(null)
   const svgRef = useRef<SVGSVGElement>(null)
   const importInputRef = useRef<HTMLInputElement>(null)
   const [isTransformMode, setIsTransformMode] = useState(false)
   const [toast, setToast] = useState<null | { kind: 'success' | 'info'; message: string }>(null)
-  const [saveDefaultConfirmOpen, setSaveDefaultConfirmOpen] = useState(false)
+  const [publishConfirmOpen, setPublishConfirmOpen] = useState(false)
+  const [reseedConfirmOpen, setReseedConfirmOpen] = useState(false)
+  const [publishSubmitting, setPublishSubmitting] = useState(false)
+  const [reseedSubmitting, setReseedSubmitting] = useState(false)
+  const [reseedTyped, setReseedTyped] = useState('')
   /** Rubber-band selection (map/SVG coordinates). */
   const [marqueeBox, setMarqueeBox] = useState<null | { x: number; y: number; width: number; height: number }>(null)
   const marqueeSessionRef = useRef<null | { pointerId: number; x1: number; y1: number; x2: number; y2: number }>(null)
@@ -345,6 +351,10 @@ export function MapCanvas() {
   const setSelectedZIndex = useMapStore((s) => s.setSelectedZIndex)
   const importMap = useMapStore((s) => s.importMap)
   const exportMap = useMapStore((s) => s.exportMap)
+  const previewMode = useMapStore((s) => s.previewMode)
+  const setPreviewMode = useMapStore((s) => s.setPreviewMode)
+  const publishDesign = useMapStore((s) => s.publishDesign)
+  const reseedPlotState = useMapStore((s) => s.reseedPlotState)
   const addPlot = useMapStore((s) => s.addPlot)
   const updatePlot = useMapStore((s) => s.updatePlot)
   const deletePlot = useMapStore((s) => s.deletePlot)
@@ -602,68 +612,81 @@ export function MapCanvas() {
     }
   }, [exportMap])
 
-  const handleRequestSaveDefaultToProject = useCallback(() => {
-    setSaveDefaultConfirmOpen(true)
+  const handleRequestPublishDesign = useCallback(() => {
+    setPublishConfirmOpen(true)
   }, [])
 
-  const handleConfirmSaveDefaultToProject = useCallback(async () => {
-    setSaveDefaultConfirmOpen(false)
-    const json = exportMap()
+  const handleConfirmPublishDesign = useCallback(async () => {
+    setPublishSubmitting(true)
+    try {
+      const { error } = await publishDesign()
+      if (error) {
+        setToast({ kind: 'info', message: `تعذر نشر التصميم: ${error}` })
+        return
+      }
+      setToast({ kind: 'success', message: 'تم نشر التصميم إلى النظام السحابي.' })
+      await reloadMapFromServer()
+      setPublishConfirmOpen(false)
+    } finally {
+      setPublishSubmitting(false)
+    }
+  }, [publishDesign])
 
-    if (import.meta.env.DEV) {
-      try {
-        const res = await fetch(saveMapDefaultApiUrl(), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json; charset=utf-8' },
-          body: json,
-        })
-        if (res.ok) {
-          setToast({ kind: 'success', message: 'تم تحديث public/map-default.json على جهاز التطوير.' })
+  const handleDiscardImportPreview = useCallback(async () => {
+    await reloadMapFromServer()
+    setPreviewMode(false)
+    setToast({ kind: 'success', message: 'تم تجاهل المعاينة واستعادة البيانات من الخادم.' })
+  }, [setPreviewMode])
+
+  const handlePublishFromPreview = useCallback(async () => {
+    const { error } = await publishDesign()
+    if (error) {
+      setToast({ kind: 'info', message: `تعذر النشر: ${error}` })
+      return
+    }
+    setPreviewMode(false)
+    await reloadMapFromServer()
+    setToast({ kind: 'success', message: 'تم نشر التصميم (دون تغيير حالات الحجز على الخادم).' })
+  }, [publishDesign, setPreviewMode])
+
+  const handleOpenReseedFromPreview = useCallback(() => {
+    setReseedTyped('')
+    setReseedConfirmOpen(true)
+  }, [])
+
+  const handleConfirmReseed = useCallback(async () => {
+    if (reseedTyped.trim() !== 'RESET') {
+      setToast({ kind: 'info', message: 'اكتب RESET بالضبط للتأكيد.' })
+      return
+    }
+    const wasPreview = previewMode
+    setReseedSubmitting(true)
+    try {
+      if (wasPreview) {
+        const pub = await publishDesign()
+        if (pub.error) {
+          setToast({ kind: 'info', message: pub.error })
           return
         }
-      } catch {
-        /* ignore */
       }
-      setToast({ kind: 'info', message: 'تعذر الحفظ عبر خادم التطوير.' })
-      return
-    }
-
-    const token = import.meta.env.VITE_MAP_SAVE_TOKEN?.trim()
-    if (!token) {
+      const rs = await reseedPlotState()
+      if (rs.error) {
+        setToast({ kind: 'info', message: rs.error })
+        return
+      }
+      setPreviewMode(false)
+      await reloadMapFromServer()
+      setReseedConfirmOpen(false)
       setToast({
-        kind: 'info',
-        message:
-          'لم يُضبط VITE_MAP_SAVE_TOKEN عند بناء الموقع. أضف الرمز في ملف البيئة ثم أعد البناء، واضبط MAP_SAVE_TOKEN أو القيمة في save-map-default.php على الخادم.',
+        kind: 'success',
+        message: wasPreview
+          ? 'تم نشر التصميم وإعادة تعيين حالات الوحدات.'
+          : 'تم إعادة تعيين حالات الوحدات من الخريطة الحالية.',
       })
-      return
+    } finally {
+      setReseedSubmitting(false)
     }
-
-    try {
-      const res = await fetch(productionSaveMapDefaultUrl(), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json; charset=utf-8',
-          'X-Map-Save-Token': token,
-        },
-        body: json,
-      })
-      const payload = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null
-      if (!res.ok || !payload?.ok) {
-        throw new Error(payload?.error ?? res.statusText)
-      }
-      setToast({ kind: 'success', message: 'تم حفظ القالب على الخادم في ملف map-default.json.' })
-      const fresh = await fetch(publicInitialMapUrl(), { cache: 'no-store' })
-      if (fresh.ok) {
-        importMap((await fresh.json()) as MapData)
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setToast({
-        kind: 'info',
-        message: `تعذر الكتابة على الخادم. تأكد من رفع save-map-default.php مع البناء وتطابق الرمز. ${msg}`,
-      })
-    }
-  }, [exportMap, importMap])
+  }, [publishDesign, reseedPlotState, reseedTyped, previewMode, setPreviewMode])
 
   const handleImportDisk = useCallback(() => {
     importInputRef.current?.click()
@@ -678,12 +701,16 @@ export function MapCanvas() {
         const text = await file.text()
         const parsed = JSON.parse(text)
         importMap(parsed)
-        setToast({ kind: 'success', message: 'تم استيراد التصميم وحفظه في المتصفح.' })
+        setPreviewMode(true)
+        setToast({
+          kind: 'success',
+          message: 'تم استيراد الملف للمعاينة المحلية. استخدم شريط الإجراءات أعلاه للنشر أو التجاهل.',
+        })
       } catch {
         setToast({ kind: 'info', message: 'ملف غير صالح. يرجى اختيار JSON صحيح.' })
       }
     },
-    [importMap],
+    [importMap, setPreviewMode],
   )
 
   const renderRoad = (r: Road) => {
@@ -1173,7 +1200,7 @@ export function MapCanvas() {
           return
         }
 
-        const keys = [...new Set(collectKeysInMarquee(n))]
+        const keys = [...new Set(collectKeysInMarquee(n))] as string[]
         selectComponentsOnly(keys)
         selectPlot(null)
       }
@@ -1610,6 +1637,37 @@ export function MapCanvas() {
 
   return (
     <div className="map-zoom-root relative h-full w-full min-h-0 min-w-0 flex-1 rounded-[inherit] bg-slate-100">
+      {isAdmin && previewMode && (
+        <div
+          className="absolute top-2 left-2 right-2 z-30 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50/95 px-3 py-2 text-xs font-bold text-amber-950 shadow-lg backdrop-blur-sm"
+          dir="rtl"
+        >
+          <span>معاينة ملف مستورد — لم يُنشر بعد على الخادم</span>
+          <div className="flex flex-wrap gap-1">
+            <button
+              type="button"
+              onClick={() => void handleDiscardImportPreview()}
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 hover:bg-slate-50"
+            >
+              تجاهل
+            </button>
+            <button
+              type="button"
+              onClick={() => void handlePublishFromPreview()}
+              className="rounded-lg bg-primary px-2 py-1 text-white hover:opacity-95"
+            >
+              نشر التصميم فقط
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenReseedFromPreview}
+              className="rounded-lg border border-rose-300 bg-rose-50 px-2 py-1 text-rose-900 hover:bg-rose-100"
+            >
+              نشر + إعادة حالات
+            </button>
+          </div>
+        </div>
+      )}
       {/* LTR: pan/zoom math + bounds match screen X; body RTL was mirroring layout and blocking one pan direction */}
       <div className="map-zoom-stage absolute inset-0" dir="ltr">
         <TransformWrapper
@@ -1660,7 +1718,7 @@ export function MapCanvas() {
                 overflow="visible"
                 viewBox={`0 0 ${sheet.width} ${sheet.height}`}
                 preserveAspectRatio="xMidYMid meet"
-                className="map-zoom-svg block cursor-grab touch-none select-none bg-[#f4f9f2] active:cursor-grabbing"
+                className="map-zoom-svg block cursor-grab touch-none select-none bg-[#eef2ff] active:cursor-grabbing"
                 onPointerDown={onSvgBackgroundPointerDown}
               >
                 <rect
@@ -1668,7 +1726,7 @@ export function MapCanvas() {
                   y={0}
                   width={sheet.width}
                   height={sheet.height}
-                  fill="#f4f9f2"
+                  fill="#eef2ff"
                   className={mapTransformBlockInfra ? 'map-infra-marquee-root' : undefined}
                 />
 
@@ -1730,8 +1788,11 @@ export function MapCanvas() {
         onUndo={undo}
         onRedo={redo}
         onExportDisk={handleExportDisk}
-        onSaveDefaultToProject={handleRequestSaveDefaultToProject}
+        onPublishDesign={handleRequestPublishDesign}
         onImportDisk={handleImportDisk}
+        onReseedPlotState={handleOpenReseedFromPreview}
+        isAdmin={isAdmin}
+        previewMode={previewMode}
         onZoomIn={() => transformRef.current?.zoomIn(0.4, 200)}
         onZoomOut={() => transformRef.current?.zoomOut(0.4, 200)}
         onFitView={fitView}
@@ -1750,15 +1811,43 @@ export function MapCanvas() {
         onChange={onImportFileChange}
       />
       <ConfirmDialog
-        open={saveDefaultConfirmOpen}
-        title="حفظ القالب الافتراضي"
-        message="سيُستبدل ملف القالب الافتراضي على الخادم (map-default.json). يجب ضبط الرمز السري في البيئة والخادم كما في .env.example. هل تريد المتابعة؟"
-        confirmLabel="نعم، احفظ"
+        open={publishConfirmOpen}
+        title="نشر التصميم"
+        message="سيتم حفظ شكل الخريطة (البلوكات والشوارع والوحدات) في النظام السحابي. حالات الحجز الحالية على الخادم لن تُستبدل ما لم تختر إعادة تعيين الحالات."
+        confirmLabel="نشر"
         cancelLabel="إلغاء"
         confirmVariant="primary"
-        onConfirm={handleConfirmSaveDefaultToProject}
-        onCancel={() => setSaveDefaultConfirmOpen(false)}
+        confirmLoading={publishSubmitting}
+        onConfirm={() => void handleConfirmPublishDesign()}
+        onCancel={() => setPublishConfirmOpen(false)}
       />
+      <ConfirmDialog
+        open={reseedConfirmOpen}
+        title="إعادة تعيين حالات الوحدات"
+        message="سيتم استبدال حجوزات الخادم بحالات الخريطة الحالية لكل وحدة."
+        confirmLabel="تأكيد"
+        cancelLabel="إلغاء"
+        confirmVariant="danger"
+        disableConfirm={reseedTyped.trim() !== 'RESET'}
+        confirmLoading={reseedSubmitting}
+        onConfirm={() => void handleConfirmReseed()}
+        onCancel={() => setReseedConfirmOpen(false)}
+      >
+        <div className="space-y-2">
+          <p className="text-xs font-bold text-slate-500">
+            اكتب <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-800">RESET</span> للمتابعة.
+          </p>
+          <input
+            type="text"
+            value={reseedTyped}
+            onChange={(e) => setReseedTyped(e.target.value)}
+            disabled={reseedSubmitting}
+            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-rose-200 disabled:cursor-not-allowed disabled:opacity-60"
+            placeholder="RESET"
+            autoComplete="off"
+          />
+        </div>
+      </ConfirmDialog>
       {toast && (
         <div className="pointer-events-none absolute bottom-4 start-4 z-30">
           <div
