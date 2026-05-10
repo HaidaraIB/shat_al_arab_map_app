@@ -26,6 +26,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { Toolbar } from './Toolbar'
 import { useAuth } from '../../lib/auth'
 import { reloadMapFromServer } from '../../store/mapStore'
+import { useToast } from '../ui/Toast'
 
 function facilityFill(kind: Facility['kind']): string {
   switch (kind) {
@@ -317,11 +318,11 @@ function computeBlockAddStats(block: Block, allPlots: Plot[]) {
  */
 export function MapCanvas() {
   const { isAdmin } = useAuth()
+  const toast = useToast()
   const transformRef = useRef<ReactZoomPanPinchRef>(null)
   const svgRef = useRef<SVGSVGElement>(null)
   const importInputRef = useRef<HTMLInputElement>(null)
   const [isTransformMode, setIsTransformMode] = useState(false)
-  const [toast, setToast] = useState<null | { kind: 'success' | 'info'; message: string }>(null)
   const [publishConfirmOpen, setPublishConfirmOpen] = useState(false)
   const [reseedConfirmOpen, setReseedConfirmOpen] = useState(false)
   const [publishSubmitting, setPublishSubmitting] = useState(false)
@@ -441,12 +442,6 @@ export function MapCanvas() {
       window.removeEventListener('blur', onBlur)
     }
   }, [deletePlot, deleteSelectedComponents, redo, selectedPlotId, undo])
-
-  useEffect(() => {
-    if (!toast) return
-    const t = window.setTimeout(() => setToast(null), 2200)
-    return () => window.clearTimeout(t)
-  }, [toast])
 
   /** While Ctrl/Meta is held, infra hit targets exclude pan/zoom so component selection/drag stays usable. */
   const [mapTransformBlockInfra, setMapTransformBlockInfra] = useState(false)
@@ -606,11 +601,11 @@ export function MapCanvas() {
       a.click()
       a.remove()
       URL.revokeObjectURL(url)
-      setToast({ kind: 'success', message: 'تم تصدير التصميم إلى ملف على الجهاز.' })
+      toast.success('تم تصدير التصميم إلى ملف على الجهاز.')
     } catch {
-      setToast({ kind: 'info', message: 'تعذر تصدير الملف. حاول مرة أخرى.' })
+      toast.error('تعذر تصدير الملف. حاول مرة أخرى.')
     }
-  }, [exportMap])
+  }, [exportMap, toast])
 
   const handleRequestPublishDesign = useCallback(() => {
     setPublishConfirmOpen(true)
@@ -621,33 +616,33 @@ export function MapCanvas() {
     try {
       const { error } = await publishDesign()
       if (error) {
-        setToast({ kind: 'info', message: `تعذر نشر التصميم: ${error}` })
+        toast.error(`تعذر نشر التصميم: ${error}`)
         return
       }
-      setToast({ kind: 'success', message: 'تم نشر التصميم إلى النظام السحابي.' })
+      toast.success('تم نشر التصميم إلى النظام السحابي.')
       await reloadMapFromServer()
       setPublishConfirmOpen(false)
     } finally {
       setPublishSubmitting(false)
     }
-  }, [publishDesign])
+  }, [publishDesign, toast])
 
   const handleDiscardImportPreview = useCallback(async () => {
     await reloadMapFromServer()
     setPreviewMode(false)
-    setToast({ kind: 'success', message: 'تم تجاهل المعاينة واستعادة البيانات من الخادم.' })
-  }, [setPreviewMode])
+    toast.success('تم تجاهل المعاينة واستعادة البيانات من الخادم.')
+  }, [setPreviewMode, toast])
 
   const handlePublishFromPreview = useCallback(async () => {
     const { error } = await publishDesign()
     if (error) {
-      setToast({ kind: 'info', message: `تعذر النشر: ${error}` })
+      toast.error(`تعذر النشر: ${error}`)
       return
     }
     setPreviewMode(false)
     await reloadMapFromServer()
-    setToast({ kind: 'success', message: 'تم نشر التصميم (دون تغيير حالات الحجز على الخادم).' })
-  }, [publishDesign, setPreviewMode])
+    toast.success('تم نشر التصميم (دون تغيير حالات الحجز على الخادم).')
+  }, [publishDesign, setPreviewMode, toast])
 
   const handleOpenReseedFromPreview = useCallback(() => {
     setReseedTyped('')
@@ -656,7 +651,7 @@ export function MapCanvas() {
 
   const handleConfirmReseed = useCallback(async () => {
     if (reseedTyped.trim() !== 'RESET') {
-      setToast({ kind: 'info', message: 'اكتب RESET بالضبط للتأكيد.' })
+      toast.warning('اكتب RESET بالضبط للتأكيد.')
       return
     }
     const wasPreview = previewMode
@@ -665,28 +660,27 @@ export function MapCanvas() {
       if (wasPreview) {
         const pub = await publishDesign()
         if (pub.error) {
-          setToast({ kind: 'info', message: pub.error })
+          toast.error(pub.error)
           return
         }
       }
       const rs = await reseedPlotState()
       if (rs.error) {
-        setToast({ kind: 'info', message: rs.error })
+        toast.error(rs.error)
         return
       }
       setPreviewMode(false)
       await reloadMapFromServer()
       setReseedConfirmOpen(false)
-      setToast({
-        kind: 'success',
-        message: wasPreview
+      toast.success(
+        wasPreview
           ? 'تم نشر التصميم وإعادة تعيين حالات الوحدات.'
           : 'تم إعادة تعيين حالات الوحدات من الخريطة الحالية.',
-      })
+      )
     } finally {
       setReseedSubmitting(false)
     }
-  }, [publishDesign, reseedPlotState, reseedTyped, previewMode, setPreviewMode])
+  }, [publishDesign, reseedPlotState, reseedTyped, previewMode, setPreviewMode, toast])
 
   const handleImportDisk = useCallback(() => {
     importInputRef.current?.click()
@@ -702,15 +696,14 @@ export function MapCanvas() {
         const parsed = JSON.parse(text)
         importMap(parsed)
         setPreviewMode(true)
-        setToast({
-          kind: 'success',
-          message: 'تم استيراد الملف للمعاينة المحلية. استخدم شريط الإجراءات أعلاه للنشر أو التجاهل.',
-        })
+        toast.success(
+          'تم استيراد الملف للمعاينة المحلية. استخدم شريط الإجراءات أعلاه للنشر أو التجاهل.',
+        )
       } catch {
-        setToast({ kind: 'info', message: 'ملف غير صالح. يرجى اختيار JSON صحيح.' })
+        toast.error('ملف غير صالح. يرجى اختيار JSON صحيح.')
       }
     },
-    [importMap, setPreviewMode],
+    [importMap, setPreviewMode, toast],
   )
 
   const renderRoad = (r: Road) => {
@@ -1403,7 +1396,7 @@ export function MapCanvas() {
       return pos.row === row && pos.col === col
     })
     if (occupied) {
-      setToast({ kind: 'info', message: 'هذه الخانة مشغولة بالفعل. اختر صفًا/عمودًا آخر.' })
+      toast.warning('هذه الخانة مشغولة بالفعل. اختر صفًا/عمودًا آخر.')
       return
     }
     const blockPlotsCount = map.plots.filter((p) => p.blockId === blockId).length
@@ -1437,7 +1430,7 @@ export function MapCanvas() {
       polygon,
       meta,
     })
-  }, [addPlot, map, map.blocks, map.plots, selectedKeys])
+  }, [addPlot, map, map.blocks, map.plots, selectedKeys, toast])
 
   const growBlockGrid = useCallback(
     (blockId: string, addRows: number, addCols: number) => {
@@ -1446,9 +1439,9 @@ export function MapCanvas() {
       const rows = Math.max(1, (block.rows ?? 1) + addRows)
       const cols = Math.max(1, (block.cols ?? 1) + addCols)
       setBlockGrid(blockId, rows, cols)
-      setToast({ kind: 'success', message: `تم تحديث شبكة ${blockId} إلى ${rows}×${cols}.` })
+      toast.success(`تم تحديث شبكة ${blockId} إلى ${rows}×${cols}.`)
     },
-    [map.blocks, setBlockGrid],
+    [map.blocks, setBlockGrid, toast],
   )
 
   const addContextRoad = useCallback(() => {
@@ -1576,16 +1569,16 @@ export function MapCanvas() {
     (text: string) => {
       if (!selectedPlotId || !text) return
       updatePlot(selectedPlotId, { number: text })
-      setToast({ kind: 'success', message: 'تم تحديث رقم/اسم الخلية.' })
+      toast.success('تم تحديث رقم/اسم الخلية.')
     },
-    [selectedPlotId, updatePlot],
+    [selectedPlotId, updatePlot, toast],
   )
 
   const deleteSelectedPlotCell = useCallback(() => {
     if (!selectedPlotId) return
     deletePlot(selectedPlotId)
-    setToast({ kind: 'success', message: 'تم حذف الخلية المحددة.' })
-  }, [deletePlot, selectedPlotId])
+    toast.success('تم حذف الخلية المحددة.')
+  }, [deletePlot, selectedPlotId, toast])
 
   const deleteBlockRow = useCallback(
     (blockId: string, rowNumber1: number) => {
@@ -1595,7 +1588,7 @@ export function MapCanvas() {
       const cols = Math.max(1, block.cols ?? 1)
       const row = Math.min(rows, Math.max(1, Math.floor(rowNumber1))) - 1
       if (rows <= 1) {
-        setToast({ kind: 'info', message: 'لا يمكن حذف الصف الأخير.' })
+        toast.warning('لا يمكن حذف الصف الأخير.')
         return
       }
       for (const p of map.plots.filter((x) => x.blockId === blockId)) {
@@ -1606,9 +1599,9 @@ export function MapCanvas() {
         else if (r > row) updatePlot(p.id, { meta: { ...(p.meta ?? {}), row: r - 1, col: c } })
       }
       setBlockGrid(blockId, rows - 1, cols)
-      setToast({ kind: 'success', message: `تم حذف الصف ${row + 1} من ${blockId}.` })
+      toast.success(`تم حذف الصف ${row + 1} من ${blockId}.`)
     },
-    [deletePlot, map.blocks, map.plots, setBlockGrid, updatePlot],
+    [deletePlot, map.blocks, map.plots, setBlockGrid, updatePlot, toast],
   )
 
   const deleteBlockCol = useCallback(
@@ -1619,7 +1612,7 @@ export function MapCanvas() {
       const cols = Math.max(1, block.cols ?? 1)
       const col = Math.min(cols, Math.max(1, Math.floor(colNumber1))) - 1
       if (cols <= 1) {
-        setToast({ kind: 'info', message: 'لا يمكن حذف العمود الأخير.' })
+        toast.warning('لا يمكن حذف العمود الأخير.')
         return
       }
       for (const p of map.plots.filter((x) => x.blockId === blockId)) {
@@ -1630,9 +1623,9 @@ export function MapCanvas() {
         else if (c > col) updatePlot(p.id, { meta: { ...(p.meta ?? {}), row: r, col: c - 1 } })
       }
       setBlockGrid(blockId, rows, cols - 1)
-      setToast({ kind: 'success', message: `تم حذف العمود ${col + 1} من ${blockId}.` })
+      toast.success(`تم حذف العمود ${col + 1} من ${blockId}.`)
     },
-    [deletePlot, map.blocks, map.plots, setBlockGrid, updatePlot],
+    [deletePlot, map.blocks, map.plots, setBlockGrid, updatePlot, toast],
   )
 
   return (
@@ -1848,21 +1841,6 @@ export function MapCanvas() {
           />
         </div>
       </ConfirmDialog>
-      {toast && (
-        <div className="pointer-events-none absolute bottom-4 start-4 z-30">
-          <div
-            role="status"
-            aria-live="polite"
-            className={`rounded-xl px-4 py-2 text-xs font-bold shadow-lg ${
-              toast.kind === 'success'
-                ? 'bg-emerald-600 text-white'
-                : 'bg-slate-900 text-white'
-            }`}
-          >
-            {toast.message}
-          </div>
-        </div>
-      )}
     </div>
   )
 }

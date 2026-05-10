@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Building2, 
@@ -25,14 +25,16 @@ import {
   EyeOff,
 } from 'lucide-react';
 import { Unit, UnitStatus, Block } from './types';
+import type { MapData } from './types/map';
 import { legacyBlocksFromMapData } from './utils/legacyBlocksFromMap';
 import { MapCanvas } from './components/map/MapCanvas';
 import { ConfirmDialog } from './components/map/ConfirmDialog';
 import { LoadingSpinner } from './components/ui/LoadingIndicator';
+import { useToast } from './components/ui/Toast';
 import { useMapStore, bootstrapPublicMap } from './store/mapStore';
 import { useAuth } from './lib/auth';
-import { getSupabase } from './lib/supabase';
-import { upsertPlotStateFromPlot, reseedPlotStateRemote } from './lib/mapRemote';
+import { getSupabase, isSupabaseConfigured } from './lib/supabase';
+import { publishDesignRemote, upsertPlotStateFromPlot, reseedPlotStateRemote } from './lib/mapRemote';
 import { createEmployee, updateEmployeeRole } from './lib/employees';
 import type { Database } from './lib/database.types';
 import type { UserRole } from './lib/database.types';
@@ -53,9 +55,130 @@ const DEFAULT_CONFIGS: Record<'A' | 'B' | 'C', CategoryConfig> = {
   C: { basePrice: 180000000, baseArea: 200, cornerPremium: 15, cornerAreaBonus: 20 },
 };
 
+const CATEGORY_CONFIGS_STORAGE_KEY = 'shat_al_arab_category_configs_v1'
+
+function cloneCategoryConfigs(c: Record<'A' | 'B' | 'C', CategoryConfig>): Record<'A' | 'B' | 'C', CategoryConfig> {
+  return {
+    A: { ...c.A },
+    B: { ...c.B },
+    C: { ...c.C },
+  }
+}
+
+function parseMetaNum(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+/** Reads category cards from the loaded map (plot meta is the source of truth after save). */
+function deriveCategoryConfigsFromMap(map: MapData): Record<'A' | 'B' | 'C', CategoryConfig> {
+  const out = cloneCategoryConfigs(DEFAULT_CONFIGS)
+  for (const cat of ['A', 'B', 'C'] as const) {
+    const catPlots = map.plots.filter((p) => (p.meta as Record<string, unknown> | undefined)?.category === cat)
+    if (catPlots.length === 0) continue
+
+    const normal =
+      catPlots.find((p) => (p.meta as Record<string, unknown>).unitType !== 'ركن') ?? catPlots[0]
+    const corner = catPlots.find((p) => (p.meta as Record<string, unknown>).unitType === 'ركن')
+
+    const nm = normal?.meta as Record<string, unknown> | undefined
+    if (nm) {
+      const bp = parseMetaNum(nm.price)
+      const ba = parseMetaNum(nm.area)
+      if (bp != null) out[cat].basePrice = bp
+      if (ba != null) out[cat].baseArea = ba
+    }
+
+    if (corner?.meta && nm) {
+      const cm = corner.meta as Record<string, unknown>
+      const cp = parseMetaNum(cm.price)
+      const ca = parseMetaNum(cm.area)
+      const baseP = parseMetaNum(nm.price) ?? out[cat].basePrice
+      const baseA = parseMetaNum(nm.area) ?? out[cat].baseArea
+      if (cp != null && baseP > 0) {
+        const pct = ((cp / baseP - 1) * 100)
+        if (Number.isFinite(pct)) out[cat].cornerPremium = Math.round(pct * 100) / 100
+      }
+      if (ca != null && baseA != null) {
+        out[cat].cornerAreaBonus = Math.round(ca - baseA)
+      }
+    }
+  }
+  return out
+}
+
+function loadCategoryConfigsFromStorage(): Record<'A' | 'B' | 'C', CategoryConfig> | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(CATEGORY_CONFIGS_STORAGE_KEY)
+    if (!raw) return null
+    const p = JSON.parse(raw) as unknown
+    if (!p || typeof p !== 'object') return null
+    for (const cat of ['A', 'B', 'C'] as const) {
+      const c = (p as Record<string, unknown>)[cat]
+      if (!c || typeof c !== 'object') return null
+      const o = c as Record<string, unknown>
+      if (
+        typeof o.basePrice !== 'number' ||
+        typeof o.baseArea !== 'number' ||
+        typeof o.cornerPremium !== 'number' ||
+        typeof o.cornerAreaBonus !== 'number'
+      ) {
+        return null
+      }
+    }
+    return cloneCategoryConfigs(p as Record<'A' | 'B' | 'C', CategoryConfig>)
+  } catch {
+    return null
+  }
+}
+
+function persistCategoryConfigsToStorage(c: Record<'A' | 'B' | 'C', CategoryConfig>): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(CATEGORY_CONFIGS_STORAGE_KEY, JSON.stringify(c))
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+/** Applies category rules to plot meta (preview or persist). */
+function applyCategoryConfigsToMap(map: MapData, newConfigs: Record<'A' | 'B' | 'C', CategoryConfig>): MapData {
+  return {
+    ...map,
+    plots: map.plots.map((plot) => {
+      const meta = (plot.meta ?? {}) as Record<string, unknown>
+      const cat = meta.category as 'A' | 'B' | 'C' | undefined
+      if (!cat || !newConfigs[cat]) return plot
+      const cfg = newConfigs[cat]
+      const isCorner = meta.unitType === 'ركن'
+      return {
+        ...plot,
+        meta: {
+          ...meta,
+          price: isCorner ? cfg.basePrice * (1 + cfg.cornerPremium / 100) : cfg.basePrice,
+          area: isCorner ? cfg.baseArea + cfg.cornerAreaBonus : cfg.baseArea,
+        },
+      }
+    }),
+  }
+}
+
 export default function App() {
+  const toast = useToast();
   const { profile, isAdmin, signOut } = useAuth();
-  const [configs, setConfigs] = useState(DEFAULT_CONFIGS);
+  const initialCategoryConfigs = useMemo(
+    () => cloneCategoryConfigs(loadCategoryConfigsFromStorage() ?? DEFAULT_CONFIGS),
+    [],
+  );
+  const [configs, setConfigs] = useState(initialCategoryConfigs);
+  const [savedConfigs, setSavedConfigs] = useState(() => cloneCategoryConfigs(initialCategoryConfigs));
+  const configsHydratedFromMapRef = useRef(false);
+  const [settingsSaveLoading, setSettingsSaveLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [filter, setFilter] = useState<'all' | UnitStatus>('all');
   const [selectedUnit, setSelectedUnit] = useState<Unit | null>(null);
@@ -90,6 +213,15 @@ export default function App() {
   const hoveredPlotIdOnMap = useMapStore((s) => s.hoveredPlotId);
   const mapData = useMapStore((s) => s.map);
   const updateMapPlot = useMapStore((s) => s.updatePlot);
+
+  useEffect(() => {
+    if (configsHydratedFromMapRef.current) return;
+    if (!mapData.plots?.length) return;
+    const derived = deriveCategoryConfigsFromMap(mapData);
+    setConfigs(derived);
+    setSavedConfigs(cloneCategoryConfigs(derived));
+    configsHydratedFromMapRef.current = true;
+  }, [mapData]);
 
   useEffect(() => {
     void bootstrapPublicMap()
@@ -249,26 +381,57 @@ export default function App() {
 
   const updateAllPrices = async (newConfigs: typeof configs) => {
     useMapStore.setState((s) => ({
-      map: {
-        ...s.map,
-        plots: s.map.plots.map((plot) => {
-          const meta = (plot.meta ?? {}) as Record<string, unknown>
-          const cat = meta.category as 'A' | 'B' | 'C' | undefined
-          if (!cat || !newConfigs[cat]) return plot
-          const cfg = newConfigs[cat]
-          const isCorner = meta.unitType === 'ركن'
-          return {
-            ...plot,
-            meta: {
-              ...meta,
-              price: isCorner ? cfg.basePrice * (1 + cfg.cornerPremium / 100) : cfg.basePrice,
-              area: isCorner ? cfg.baseArea + cfg.cornerAreaBonus : cfg.baseArea,
-            },
-          }
-        }),
-      },
+      map: applyCategoryConfigsToMap(s.map, newConfigs),
     }))
-    await reseedPlotStateRemote(useMapStore.getState().map)
+    const map = useMapStore.getState().map
+    if (!isSupabaseConfigured()) {
+      return { plotStateError: null as string | null, designError: null as string | null }
+    }
+    const plotStateResult = await reseedPlotStateRemote(map)
+    const designResult = await publishDesignRemote(map)
+    const plotStateError = plotStateResult.error ?? null
+    const designError = designResult.error ?? null
+    if (plotStateError) console.warn('[settings] plot_state sync:', plotStateError)
+    if (designError) console.warn('[settings] design publish:', designError)
+    return { plotStateError, designError }
+  }
+
+  const configsDirty = useMemo(() => {
+    return (['A', 'B', 'C'] as const).some(
+      (cat) =>
+        configs[cat].basePrice !== savedConfigs[cat].basePrice ||
+        configs[cat].baseArea !== savedConfigs[cat].baseArea ||
+        configs[cat].cornerPremium !== savedConfigs[cat].cornerPremium ||
+        configs[cat].cornerAreaBonus !== savedConfigs[cat].cornerAreaBonus,
+    )
+  }, [configs, savedConfigs])
+
+  const settingsPreviewData = useMemo(
+    () => legacyBlocksFromMapData(applyCategoryConfigsToMap(mapData, configs)),
+    [mapData, configs],
+  )
+
+  const handleSaveProjectSettings = async () => {
+    setSettingsSaveLoading(true)
+    try {
+      const { plotStateError, designError } = await updateAllPrices(configs)
+      const ok = !plotStateError && !designError
+      if (ok) {
+        const next = cloneCategoryConfigs(configs)
+        setSavedConfigs(next)
+        persistCategoryConfigsToStorage(next)
+        toast.success(
+          isSupabaseConfigured()
+            ? 'تم حفظ إعدادات المشروع ومزامنتها مع الخادم.'
+            : 'تم حفظ الإعدادات محليًا في المتصفح.',
+        )
+      } else {
+        const msg = [plotStateError, designError].filter(Boolean).join(' · ')
+        toast.error(msg || 'فشل الحفظ على الخادم — لم تُحدَّث البيانات.')
+      }
+    } finally {
+      setSettingsSaveLoading(false)
+    }
   }
 
   const handleConfirmSignOut = async () => {
@@ -284,9 +447,19 @@ export default function App() {
   const handleConfirmResetDefaults = async () => {
     setResetDefaultsLoading(true)
     try {
-      setConfigs(DEFAULT_CONFIGS)
-      await updateAllPrices(DEFAULT_CONFIGS)
+      const defaults = cloneCategoryConfigs(DEFAULT_CONFIGS)
+      setConfigs(defaults)
+      const { plotStateError, designError } = await updateAllPrices(defaults)
+      const ok = !plotStateError && !designError
       setResetDefaultsConfirmOpen(false)
+      if (ok) {
+        setSavedConfigs(defaults)
+        persistCategoryConfigsToStorage(defaults)
+        toast.success('تم استعادة الإعدادات الافتراضية وحفظها.')
+      } else {
+        const msg = [plotStateError, designError].filter(Boolean).join(' · ')
+        toast.error(msg || 'تعذر حفظ الإعدادات الافتراضية على الخادم.')
+      }
     } finally {
       setResetDefaultsLoading(false)
     }
@@ -298,12 +471,13 @@ export default function App() {
     setRoleChangeLoading(true)
     try {
       const res = await updateEmployeeRole(userId, nextRole)
-      if (res.ok) {
-        await reloadTeamProfiles()
-        setRoleChangeRequest(null)
-      } else {
-        alert(res.error)
+      if (res.ok === false) {
+        toast.error(res.error)
+        return
       }
+      await reloadTeamProfiles()
+      setRoleChangeRequest(null)
+      toast.success('تم تحديث صلاحية المستخدم.')
     } finally {
       setRoleChangeLoading(false)
     }
@@ -392,7 +566,7 @@ export default function App() {
               <motion.div key="dashboard" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="h-full overflow-y-auto p-8 space-y-8">
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                   <StatCard label="إجمالي الوحدات" value={stats.total} icon={<Building2 className="text-blue-500" />} sub="الزون الأول" />
-                  <StatCard label="الوحدات المباعة" value={stats.sold} icon={<CheckCircle2 className="text-primary" />} sub={`${stats.percentage}% مباع`} />
+                  <StatCard label="الوحدات المباعة" value={stats.sold} icon={<CheckCircle2 className="text-red-600" />} sub={`${stats.percentage}% مباع`} />
                   <StatCard label="الوحدات المتبقية" value={stats.available} icon={<Circle className="text-amber-500" />} sub={`${100 - stats.percentage}% متبقي`} />
                   <div className="bg-primary rounded-3xl p-6 text-white shadow-lg shadow-primary/20 relative overflow-hidden group">
                     <TrendingUp className="absolute -bottom-2 -right-2 opacity-20" size={80} />
@@ -468,7 +642,7 @@ export default function App() {
                 <div className="flex items-center justify-between">
                   <h2 className="text-3xl font-black text-slate-900 tracking-tight">تقارير المبيعات التفصيلية</h2>
                   <div className="flex gap-4">
-                    <div className="px-6 py-3 bg-primary text-white rounded-2xl shadow-lg flex items-center gap-3">
+                    <div className="px-6 py-3 bg-red-600 text-white rounded-2xl shadow-lg shadow-red-900/25 flex items-center gap-3">
                       <TrendingUp size={20} />
                       <div className="flex flex-col">
                         <span className="text-[10px] font-bold opacity-80">إجمالي المبيعات</span>
@@ -486,15 +660,15 @@ export default function App() {
                       <div key={block.id} className="bg-white p-6 rounded-[32px] border border-slate-200 shadow-sm transition-all hover:shadow-md">
                         <div className="flex justify-between items-center mb-4">
                           <h4 className="font-black text-lg text-slate-800 tracking-tight">{block.name}</h4>
-                          <span className="px-3 py-1 bg-primary/10 text-primary rounded-xl text-[10px] font-black">{blockSold.length} مبيع</span>
+                          <span className="px-3 py-1 bg-red-100 text-red-800 rounded-xl text-[10px] font-black">{blockSold.length} مبيع</span>
                         </div>
                         <div className="space-y-3">
                           <div className="flex justify-between text-xs font-bold text-slate-400">
                             <span>القيمة الإجمالية</span>
-                            <span className="text-primary">{blockSold.reduce((acc, u) => acc + (u.price || 0), 0).toLocaleString()} IQD</span>
+                            <span className="text-red-700">{blockSold.reduce((acc, u) => acc + (u.price || 0), 0).toLocaleString()} IQD</span>
                           </div>
                           <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
-                            <div className="h-full bg-primary" style={{ width: `${(blockSold.length / block.units.length) * 100}%` }} />
+                            <div className="h-full bg-red-600" style={{ width: `${(blockSold.length / block.units.length) * 100}%` }} />
                           </div>
                         </div>
                       </div>
@@ -532,7 +706,11 @@ export default function App() {
                               <td className="p-4 font-bold text-slate-700">{row.action}</td>
                               <td className="p-4 font-black">{row.plot_id}</td>
                               <td className="p-4 font-bold text-slate-700">{row.customer_name || '—'}</td>
-                              <td className="p-4 text-left font-black text-primary">
+                              <td
+                                className={`p-4 text-left font-black ${
+                                  row.action === 'sold' ? 'text-red-600' : 'text-primary'
+                                }`}
+                              >
                                 {row.price != null ? `${Number(row.price).toLocaleString()} IQD` : '—'}
                               </td>
                             </tr>
@@ -567,6 +745,18 @@ export default function App() {
                           : row.action === 'released'
                             ? `إلغاء حجز: ${row.plot_id}`
                             : `تغيير سعر: ${row.plot_id}`
+                    const iconAccent =
+                      row.action === 'sold'
+                        ? 'bg-red-100 text-red-600 group-hover:bg-red-600 group-hover:text-white'
+                        : row.action === 'reserved'
+                          ? 'bg-amber-100 text-amber-700 group-hover:bg-amber-600 group-hover:text-white'
+                          : 'bg-primary/10 text-primary group-hover:bg-primary group-hover:text-white'
+                    const customerAccent =
+                      row.action === 'sold'
+                        ? 'text-red-700'
+                        : row.action === 'reserved'
+                          ? 'text-amber-800'
+                          : 'text-primary'
                     return (
                       <motion.div
                         key={row.id}
@@ -576,7 +766,9 @@ export default function App() {
                         className="bg-white p-6 rounded-[32px] border border-slate-200 shadow-sm flex items-center gap-6 hover:shadow-md transition-all cursor-pointer group"
                         onClick={() => u && openUnitModal(u)}
                       >
-                        <div className="shrink-0 w-12 h-12 bg-primary/10 rounded-2xl flex items-center justify-center text-primary group-hover:bg-primary group-hover:text-white transition-colors">
+                        <div
+                          className={`shrink-0 w-12 h-12 rounded-2xl flex items-center justify-center transition-colors ${iconAccent}`}
+                        >
                           <CheckCircle2 size={24} />
                         </div>
                         <div className="flex-1">
@@ -589,7 +781,7 @@ export default function App() {
                           <p className="text-sm text-slate-500 font-medium leading-relaxed" dir="rtl">
                             {row.customer_name ? (
                               <>
-                                العميل: <span className="font-black text-primary">{row.customer_name}</span>
+                                العميل: <span className={`font-black ${customerAccent}`}>{row.customer_name}</span>
                                 {row.price != null && (
                                   <>
                                     {' · '}
@@ -741,8 +933,22 @@ export default function App() {
                     <h2 className="text-3xl font-black text-slate-900 tracking-tight">إعدادات المشروع العام</h2>
                     <p className="text-slate-400 font-bold mt-1 tracking-tight uppercase">التحكم بالأسعار والمساحات لجميع الفئات</p>
                   </div>
-                  <div className="flex gap-3">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveProjectSettings()}
+                      disabled={!configsDirty || settingsSaveLoading}
+                      className="flex items-center gap-2 px-5 py-2.5 bg-primary text-white rounded-2xl text-xs font-black hover:opacity-95 transition-all disabled:opacity-40 disabled:pointer-events-none"
+                    >
+                      {settingsSaveLoading ? (
+                        <LoadingSpinner size="sm" className="border-white/30 border-t-white" />
+                      ) : (
+                        <Save size={16} />
+                      )}
+                      <span>حفظ التغييرات</span>
+                    </button>
                     <button 
+                      type="button"
                       onClick={() => setResetDefaultsConfirmOpen(true)}
                       className="flex items-center gap-2 px-5 py-2.5 bg-slate-100 text-slate-600 rounded-2xl text-xs font-black hover:bg-slate-200 transition-all"
                     >
@@ -766,12 +972,12 @@ export default function App() {
                           <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">السعر الأساسي (IQD)</label>
                           <input 
                             type="number" 
+                            step={1000}
                             className="w-full bg-slate-50 border border-slate-100 rounded-xl px-4 py-2 font-black text-slate-700 outline-none focus:ring-2 focus:ring-primary/20"
                             value={configs[cat].basePrice}
                             onChange={(e) => {
                               const newCfgs = { ...configs, [cat]: { ...configs[cat], basePrice: Number(e.target.value) } };
                               setConfigs(newCfgs);
-                              void updateAllPrices(newCfgs);
                             }}
                           />
                         </div>
@@ -785,7 +991,6 @@ export default function App() {
                               onChange={(e) => {
                                 const newCfgs = { ...configs, [cat]: { ...configs[cat], baseArea: Number(e.target.value) } };
                                 setConfigs(newCfgs);
-                                void updateAllPrices(newCfgs);
                               }}
                             />
                           </div>
@@ -798,7 +1003,6 @@ export default function App() {
                               onChange={(e) => {
                                 const newCfgs = { ...configs, [cat]: { ...configs[cat], cornerPremium: Number(e.target.value) } };
                                 setConfigs(newCfgs);
-                                void updateAllPrices(newCfgs);
                               }}
                             />
                           </div>
@@ -829,7 +1033,7 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-50">
-                        {data.flatMap(b => b.units)
+                        {settingsPreviewData.flatMap(b => b.units)
                           .filter(u => !searchTerm || u.category === searchTerm || u.id.includes(searchTerm))
                           .slice(0, 50).map(unit => (
                           <tr key={unit.id} className="hover:bg-slate-50/50 transition-colors group cursor-pointer" onClick={() => openUnitModal(unit)}>
@@ -848,6 +1052,7 @@ export default function App() {
                                 <div className="flex items-center gap-2">
                                   <input 
                                     type="number"
+                                    step={1000}
                                     className="w-32 bg-slate-100 border border-slate-200 rounded-lg px-2 py-1 font-black text-sm text-slate-800 outline-none"
                                     value={tempPriceInTable}
                                     onChange={(e) => setTempPriceInTable(e.target.value)}
@@ -898,7 +1103,7 @@ export default function App() {
                   </div>
                   <div className="p-4 border-t border-slate-50 text-center bg-slate-50/30">
                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest italic flex items-center justify-center gap-2">
-                       <Save size={12} /> التعديلات تحفظ تلقائياً في ذاكرة المتصفح الحالية
+                       <Save size={12} /> اضغط «حفظ التغييرات» لتطبيق الأسعار والمساحات وحفظها على الخادم
                     </p>
                   </div>
                 </div>
@@ -974,7 +1179,7 @@ export default function App() {
                       </div>
                       <div className="pt-4 grid grid-cols-1 gap-4">
                         <div className="flex items-end gap-3">
-                          <p className="text-4xl font-black">{stats.sold}</p>
+                          <p className="text-4xl font-black text-red-400">{stats.sold}</p>
                           <p className="text-[10px] font-bold opacity-40 uppercase tracking-tight mb-2">وحدة مباعة</p>
                         </div>
                         <div className="flex items-end gap-3">
@@ -1002,7 +1207,7 @@ export default function App() {
               <div className="flex justify-between items-start">
                 <div><h3 className="text-3xl font-black text-slate-900">وحدة {selectedUnit.number}</h3><p className="text-slate-400 font-bold flex items-center gap-2 mt-1 px-1 tracking-tight">بلوك {selectedUnit.block}</p></div>
                 <div className={`px-4 py-2 rounded-2xl text-[10px] font-black uppercase tracking-widest ${
-                  selectedUnit.status === UnitStatus.SOLD ? 'bg-primary/10 text-primary' : 
+                  selectedUnit.status === UnitStatus.SOLD ? 'bg-red-100 text-red-800' : 
                   selectedUnit.status === UnitStatus.RESERVED ? 'bg-amber-100 text-amber-700' :
                   'bg-green-100 text-green-700'}`}>
                   {selectedUnit.status === UnitStatus.SOLD ? 'محجوزة نهائياً' : 
@@ -1028,6 +1233,7 @@ export default function App() {
                     <div className="flex items-center gap-2 mt-1">
                       <input 
                         type="number"
+                        step={1000}
                         className="w-full bg-slate-100 border border-slate-200 rounded-lg px-2 py-1 font-black text-sm text-slate-800 outline-none focus:ring-2 focus:ring-primary/20"
                         value={tempPrice}
                         onChange={(e) => setTempPrice(e.target.value)}
@@ -1109,11 +1315,24 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-              ) : (
-                <div className="space-y-4 bg-primary/10 p-6 rounded-3xl border border-primary/20">
+              ) : selectedUnit.status === UnitStatus.SOLD ? (
+                <div className="space-y-4 bg-red-50 p-6 rounded-3xl border border-red-200">
                   <div className="flex flex-col gap-1">
-                    <span className="text-[10px] font-black text-primary uppercase tracking-widest">اسم الحاجز</span>
-                    <span className="text-lg font-black text-primary">{selectedUnit.customerName || 'غير محدد'}</span>
+                    <span className="text-[10px] font-black text-red-700 uppercase tracking-widest">اسم الحاجز</span>
+                    <span className="text-lg font-black text-red-900">{selectedUnit.customerName || 'غير محدد'}</span>
+                  </div>
+                  {selectedUnit.note && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[10px] font-black text-red-700 uppercase tracking-widest">الملاحظات</span>
+                      <p className="text-sm font-medium text-red-900 leading-relaxed">{selectedUnit.note}</p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-4 bg-amber-50 p-6 rounded-3xl border border-amber-200">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[10px] font-black text-amber-800 uppercase tracking-widest">اسم الحاجز</span>
+                    <span className="text-lg font-black text-amber-900">{selectedUnit.customerName || 'غير محدد'}</span>
                   </div>
                   {selectedUnit.status === UnitStatus.RESERVED && selectedUnit.reservedUntil && (
                      <div className="flex flex-col gap-1">
@@ -1123,8 +1342,8 @@ export default function App() {
                   )}
                   {selectedUnit.note && (
                     <div className="flex flex-col gap-1">
-                      <span className="text-[10px] font-black text-primary uppercase tracking-widest">الملاحظات</span>
-                      <p className="text-sm font-medium text-primary leading-relaxed">{selectedUnit.note}</p>
+                      <span className="text-[10px] font-black text-amber-800 uppercase tracking-widest">الملاحظات</span>
+                      <p className="text-sm font-medium text-amber-900 leading-relaxed">{selectedUnit.note}</p>
                     </div>
                   )}
                 </div>
@@ -1138,7 +1357,7 @@ export default function App() {
                         void handleBooking(selectedUnit.id, UnitStatus.SOLD, bookingName, bookingNote);
                         setSelectedUnit(null); 
                       }} 
-                      className="flex-1 py-5 rounded-3xl bg-primary text-white font-black text-lg shadow-xl shadow-primary/20 hover:bg-primary transition-all"
+                      className="flex-1 py-5 rounded-3xl bg-red-600 text-white font-black text-lg shadow-xl shadow-red-900/25 hover:bg-red-700 transition-all"
                     >تأكيد الحجز النهائي</button>
                     <button 
                       onClick={() => { 
@@ -1241,7 +1460,7 @@ function StatCard({ label, value, icon, sub }: any) {
 function UnitBox({ unit, onClick }: any) {
   return (
     <motion.button whileHover={{ scale: 1.1, y: -2 }} whileTap={{ scale: 0.9 }} onClick={onClick} className={`aspect-square rounded-2xl flex flex-col items-center justify-center gap-1 border-2 transition-all shadow-sm ${
-      unit.status === UnitStatus.SOLD ? 'border-primary bg-primary text-white shadow-primary/20' : 
+      unit.status === UnitStatus.SOLD ? 'border-red-600 bg-red-600 text-white shadow-red-900/25' : 
       unit.status === UnitStatus.RESERVED ? 'border-amber-500 bg-amber-500 text-white shadow-amber-200' :
       'border-slate-100 bg-white text-slate-600 hover:border-primary/20 hover:bg-primary/10'
     }`}>
@@ -1279,32 +1498,29 @@ function LegendItem({ color, label }: any) {
 }
 
 function AddEmployeeForm({ onCreated }: { onCreated: () => void }) {
+  const toast = useToast();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [role, setRole] = useState<UserRole>('sales');
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
-    setSuccess(null);
     setPending(true);
     try {
       const res = await createEmployee({ email, password, name, role });
-      if (res.ok) {
-        setSuccess('تمت إضافة الموظف بنجاح.');
-        setName('');
-        setEmail('');
-        setPassword('');
-        setRole('sales');
-        onCreated();
-      } else {
-        setError(res.error);
+      if (res.ok === false) {
+        toast.error(res.error);
+        return;
       }
+      toast.success('تمت إضافة الموظف بنجاح.');
+      setName('');
+      setEmail('');
+      setPassword('');
+      setRole('sales');
+      onCreated();
     } finally {
       setPending(false);
     }
@@ -1383,17 +1599,6 @@ function AddEmployeeForm({ onCreated }: { onCreated: () => void }) {
           </select>
         </div>
       </div>
-
-      {error && (
-        <p className="text-sm font-bold text-rose-600 bg-rose-50 border border-rose-100 rounded-xl px-4 py-3">
-          {error}
-        </p>
-      )}
-      {success && (
-        <p className="text-sm font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3">
-          {success}
-        </p>
-      )}
 
       <div className="flex justify-end">
         <button

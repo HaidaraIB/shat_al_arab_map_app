@@ -4,6 +4,7 @@ import { Eye, EyeOff } from 'lucide-react'
 import type { UserRole } from './database.types'
 import { getSupabase, isSupabaseConfigured } from './supabase'
 import { LoadingIndicator, LoadingSpinner } from '../components/ui/LoadingIndicator'
+import { useToast } from '../components/ui/Toast'
 
 export type Profile = {
   id: string
@@ -286,19 +287,18 @@ function ProfileNotReady() {
 
 function LoginScreen() {
   const { signIn } = useAuth()
+  const toast = useToast()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
-    setError(null)
     setPending(true)
     try {
       const { error: err } = await signIn(email, password)
-      setError(err)
+      if (err) toast.error(err)
     } finally {
       setPending(false)
     }
@@ -350,7 +350,6 @@ function LoginScreen() {
             </button>
           </div>
         </div>
-        {error && <p className="text-sm font-bold text-rose-600 text-center">{error}</p>}
         <button
           type="submit"
           disabled={pending}

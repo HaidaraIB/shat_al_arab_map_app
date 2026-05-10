@@ -14,7 +14,7 @@ export function Legend() {
           Reserved
         </div>
         <div className="flex items-center gap-2">
-          <span className="h-3 w-6 rounded-sm bg-slate-400 border border-slate-600" />
+          <span className="h-3 w-6 rounded-sm bg-red-300 border border-red-800" />
           Sold
         </div>
       </div>

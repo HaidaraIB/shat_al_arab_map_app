@@ -6,13 +6,13 @@ import { pointsToSvgPoints } from '../../utils/svg'
 const STATUS_FILL: Record<Plot['status'], string> = {
   available: '#86efac',
   reserved: '#fde047',
-  sold: '#94a3b8',
+  sold: '#fecaca',
 }
 
 const STATUS_STROKE: Record<Plot['status'], string> = {
   available: '#166534',
   reserved: '#a16207',
-  sold: '#475569',
+  sold: '#b91c1c',
 }
 
 /** Static plot chip — no pointer events (whole-map pan/zoom only). */
