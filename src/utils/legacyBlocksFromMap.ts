@@ -3,6 +3,7 @@ import type { MapData } from '../types/map'
 import type { Block, Unit } from '../types'
 import { UnitStatus } from '../types'
 import { polygonBounds } from './geometry'
+import { toolbarGridDimensions } from './blockToolbarGrid'
 
 /** Block title as shown on the map: marker label wins, then persisted `block.label`. */
 export function effectiveBlockLabel(map: MapData, blockId: string): string {
@@ -114,6 +115,7 @@ export function legacyBlocksFromMapData(map: MapData): Block[] {
     const bb = polygonBounds(b.polygon)
     const plots = map.plots.filter((p) => p.blockId === b.id)
     const units: Unit[] = plots.map((p) => plotToLegacyUnit(p, map, b))
+    const tg = toolbarGridDimensions(b)
     return {
       id: b.id,
       name: effectiveBlockLabel(map, b.id),
@@ -123,8 +125,8 @@ export function legacyBlocksFromMapData(map: MapData): Block[] {
         y: bb.minY,
         width: Math.max(0, bb.maxX - bb.minX),
         height: Math.max(0, bb.maxY - bb.minY),
-        cols: b.cols ?? 1,
-        rows: b.rows ?? 1,
+        cols: tg.cols,
+        rows: tg.rows,
       },
     }
   })

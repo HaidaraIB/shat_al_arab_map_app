@@ -18,7 +18,8 @@ import {
   undoComponentScaleAt,
 } from '../../utils/svg'
 import { mapContentSheetSize } from '../../utils/mapContentSheet'
-import { categoryForNewPlotInBlock } from '../../utils/legacyBlocksFromMap'
+import { categoryForNewPlotInBlock, effectiveBlockLabel } from '../../utils/legacyBlocksFromMap'
+import { isCBlock, toolbarCellToInternal, toolbarGridDimensions } from '../../utils/blockToolbarGrid'
 import { Label } from './Label'
 import { PlotPolygon } from './PlotPolygon'
 import { RoadPath } from './RoadPath'
@@ -274,6 +275,16 @@ function resolvePlotGridCell(
   }
 }
 
+function compareBlockIds(a: string, b: string): number {
+  const ma = a.match(/^([A-Za-z]+)(\d+)$/)
+  const mb = b.match(/^([A-Za-z]+)(\d+)$/)
+  if (ma && mb) {
+    if (ma[1] !== mb[1]) return ma[1].localeCompare(mb[1])
+    return Number(ma[2]) - Number(mb[2])
+  }
+  return a.localeCompare(b, undefined, { numeric: true })
+}
+
 function countBands(values: number[], epsilon: number): number {
   if (values.length === 0) return 0
   const sorted = [...values].sort((a, b) => a - b)
@@ -290,11 +301,12 @@ function countBands(values: number[], epsilon: number): number {
 
 /** Grid + occupancy for add-unit toolbar; keyed by block id so the dropdown drives the summary. */
 function computeBlockAddStats(block: Block, allPlots: Plot[]) {
-  const rows = Math.max(1, block.rows ?? 1)
-  const cols = Math.max(1, block.cols ?? 1)
+  const internalRows = Math.max(1, block.rows ?? 1)
+  const internalCols = Math.max(1, block.cols ?? 1)
+  const { rows, cols } = toolbarGridDimensions(block)
   const plots = allPlots.filter((p) => p.blockId === block.id)
   const occupiedCells = plots.length
-  const totalCells = rows * cols
+  const totalCells = internalRows * internalCols
   if (plots.length === 0) {
     return { rows, cols, occupiedRows: 0, occupiedCols: 0, occupiedCells, totalCells }
   }
@@ -302,14 +314,17 @@ function computeBlockAddStats(block: Block, allPlots: Plot[]) {
   const bounds = polygonBounds(block.polygon)
   const epsX = Math.max(0.5, (bounds.maxX - bounds.minX) * 0.02)
   const epsY = Math.max(0.5, (bounds.maxY - bounds.minY) * 0.02)
-  const occupiedCols = countBands(
+  const bandsX = countBands(
     centroids.map((c) => c.x),
     epsX,
   )
-  const occupiedRows = countBands(
+  const bandsY = countBands(
     centroids.map((c) => c.y),
     epsY,
   )
+  // C blocks: toolbar “rows/cols” follow master-plan naming (transpose vs stored grid).
+  const occupiedRows = isCBlock(block.id) ? bandsX : bandsY
+  const occupiedCols = isCBlock(block.id) ? bandsY : bandsX
   return { rows, cols, occupiedRows, occupiedCols, occupiedCells, totalCells }
 }
 
@@ -1254,6 +1269,8 @@ export function MapCanvas() {
 
   const primarySelectedKey = selectedKeys[0] ?? null
   const selectedTypeLabel = useMemo(() => {
+    /** Plot/cell selection uses `selectedPlotId`, not `selectedComponentKeys` — same as font size / cell tools. */
+    if (selectedPlotId) return 'خلية'
     if (!primarySelectedKey) return undefined
     if (primarySelectedKey.startsWith('road:')) return 'شارع'
     if (primarySelectedKey.startsWith('block:')) return 'بلوك'
@@ -1261,7 +1278,7 @@ export function MapCanvas() {
     if (primarySelectedKey.startsWith('facility-label:')) return 'تسمية مرفق'
     if (primarySelectedKey.startsWith('label:')) return 'نص'
     return 'عنصر'
-  }, [primarySelectedKey])
+  }, [primarySelectedKey, selectedPlotId])
 
   const editableLabelText = useMemo(() => {
     if (!primarySelectedKey) return null
@@ -1384,8 +1401,12 @@ export function MapCanvas() {
     if (!block) return
     const gridRows = Math.max(1, block.rows ?? 1)
     const gridCols = Math.max(1, block.cols ?? 1)
-    const row = Math.min(gridRows, Math.max(1, Math.floor(requestedRow))) - 1
-    const col = Math.min(gridCols, Math.max(1, Math.floor(requestedCol))) - 1
+    const td = toolbarGridDimensions(block)
+    const tr = Math.min(td.rows, Math.max(1, Math.floor(requestedRow)))
+    const tc = Math.min(td.cols, Math.max(1, Math.floor(requestedCol)))
+    const { row: rowFromToolbar, col: colFromToolbar } = toolbarCellToInternal(block, tr, tc)
+    const row = Math.min(gridRows - 1, Math.max(0, rowFromToolbar))
+    const col = Math.min(gridCols - 1, Math.max(0, colFromToolbar))
     const b = polygonBounds(block.polygon)
     const occupied = map.plots.some((p) => {
       if (p.blockId !== blockId) return false
@@ -1442,6 +1463,15 @@ export function MapCanvas() {
       toast.success(`تم تحديث شبكة ${blockId} إلى ${rows}×${cols}.`)
     },
     [map.blocks, setBlockGrid, toast],
+  )
+
+  /** Toolbar “+صف / +عمود” follow master-plan axes for C blocks (transpose vs stored grid). */
+  const growBlockGridFromToolbar = useCallback(
+    (blockId: string, addToolbarRows: number, addToolbarCols: number) => {
+      if (isCBlock(blockId)) growBlockGrid(blockId, addToolbarCols, addToolbarRows)
+      else growBlockGrid(blockId, addToolbarRows, addToolbarCols)
+    },
+    [growBlockGrid],
   )
 
   const addContextRoad = useCallback(() => {
@@ -1549,9 +1579,6 @@ export function MapCanvas() {
     [primarySelectedKey, updateFacilityText, updateLabelText],
   )
 
-  const addPlotTargetBlockId =
-    selectedKeys.find((k) => k.startsWith('block:'))?.replace('block:', '') ?? map.blocks[0]?.id
-
   const blockAddStatsById = useMemo(() => {
     const out: Record<string, ReturnType<typeof computeBlockAddStats>> = {}
     for (const b of map.blocks) {
@@ -1560,9 +1587,26 @@ export function MapCanvas() {
     return out
   }, [map.blocks, map.plots])
 
+  const toolbarBlockSelectOptions = useMemo(
+    () =>
+      [...map.blocks]
+        .sort((a, b) => compareBlockIds(a.id, b.id))
+        .map((b) => ({
+          id: b.id,
+          label: effectiveBlockLabel(map, b.id),
+        })),
+    [map],
+  )
+
   const selectedPlot = useMemo(
     () => (selectedPlotId ? map.plots.find((p) => p.id === selectedPlotId) ?? null : null),
     [map.plots, selectedPlotId],
+  )
+
+  /** Block component explicitly selected on the map — drives add-unit + grid toolbar sections (no dropdown). */
+  const mapSelectedBlockId = useMemo(
+    () => selectedKeys.find((k) => k.startsWith('block:'))?.replace('block:', '') ?? null,
+    [selectedKeys],
   )
 
   const updateSelectedPlotNumber = useCallback(
@@ -1626,6 +1670,22 @@ export function MapCanvas() {
       toast.success(`تم حذف العمود ${col + 1} من ${blockId}.`)
     },
     [deletePlot, map.blocks, map.plots, setBlockGrid, updatePlot, toast],
+  )
+
+  const deleteBlockRowFromToolbar = useCallback(
+    (blockId: string, rowNumber1: number) => {
+      if (isCBlock(blockId)) deleteBlockCol(blockId, rowNumber1)
+      else deleteBlockRow(blockId, rowNumber1)
+    },
+    [deleteBlockCol, deleteBlockRow],
+  )
+
+  const deleteBlockColFromToolbar = useCallback(
+    (blockId: string, colNumber1: number) => {
+      if (isCBlock(blockId)) deleteBlockRow(blockId, colNumber1)
+      else deleteBlockCol(blockId, colNumber1)
+    },
+    [deleteBlockCol, deleteBlockRow],
   )
 
   return (
@@ -1752,23 +1812,26 @@ export function MapCanvas() {
 
       <Toolbar
         componentTransform={primaryTransform}
+        hideElementScaleSliders={Boolean(
+          primarySelectedKey?.startsWith('label:') || primarySelectedKey?.startsWith('facility-label:'),
+        )}
         hasSelection={selectedKeys.length > 0}
         selectionCount={selectedKeys.length}
         zPosition={zPosition}
         zMax={zMax}
         selectedTypeLabel={selectedTypeLabel}
         editableLabelText={editableLabelText}
-        blockOptions={map.blocks.map((b) => b.id)}
-        defaultAddPlotBlockId={addPlotTargetBlockId}
+        blockSelectOptions={toolbarBlockSelectOptions}
+        mapSelectedBlockId={mapSelectedBlockId}
         blockAddStatsById={blockAddStatsById}
         onPatchSelected={patchSelectedTransforms}
         onChangeSelectedZ={setSelectedZIndex}
         onDeleteSelected={deleteSelectedComponents}
         onSaveLabelText={handleSaveLabelText}
         onAddPlot={addContextPlot}
-        onGrowBlockGrid={growBlockGrid}
-        onDeleteBlockRow={deleteBlockRow}
-        onDeleteBlockCol={deleteBlockCol}
+        onGrowBlockGrid={growBlockGridFromToolbar}
+        onDeleteBlockRow={deleteBlockRowFromToolbar}
+        onDeleteBlockCol={deleteBlockColFromToolbar}
         selectedPlotNumber={selectedPlot?.number ?? null}
         onUpdateSelectedPlotNumber={updateSelectedPlotNumber}
         onDeleteSelectedPlot={deleteSelectedPlotCell}

@@ -14,9 +14,11 @@ type Props = {
   editableLabelText?: string | null
   onDeleteSelected: () => void
   onSaveLabelText: (text: string) => void
-  blockOptions: string[]
-  defaultAddPlotBlockId?: string
-  /** Per-block grid + occupancy for the add-unit section (toolbar picks row by dropdown). */
+  /** Sorted block ids with human-readable labels (marker text wins); value stays internal id. */
+  blockSelectOptions: { id: string; label: string }[]
+  /** Set when a block polygon is selected on the map (`block:…`); add-unit + grid tools use this block only. */
+  mapSelectedBlockId: string | null
+  /** Per-block grid + occupancy for add-unit / grid when `mapSelectedBlockId` is set. */
   blockAddStatsById?: Record<
     string,
     { rows: number; cols: number; occupiedRows: number; occupiedCols: number; occupiedCells: number; totalCells: number }
@@ -50,6 +52,8 @@ type Props = {
   /** 22–65 = % of one cell step along strip normal; null when no block selected. */
   selectedBlockLabelStripPercent?: number | null
   onSetBlockLabelStripPercent?: (percent: number) => void
+  /** When true, hide عرض/ارتفاع العنصر — no visual effect for standalone text / facility caption (font size is used instead). */
+  hideElementScaleSliders?: boolean
   /** Map-units font size for the current text selection (plot, road, block title, free label, facility title). */
   selectionFontSize?: number | null
   onSetSelectionFontSize?: (size: number) => void
@@ -71,8 +75,8 @@ export function Toolbar({
   editableLabelText,
   onDeleteSelected,
   onSaveLabelText,
-  blockOptions,
-  defaultAddPlotBlockId,
+  blockSelectOptions,
+  mapSelectedBlockId,
   blockAddStatsById,
   onAddPlot,
   onGrowBlockGrid,
@@ -100,6 +104,7 @@ export function Toolbar({
   onFitView,
   selectedBlockLabelStripPercent = null,
   onSetBlockLabelStripPercent,
+  hideElementScaleSliders = false,
   selectionFontSize = null,
   onSetSelectionFontSize,
   selectionSubLabelFontSize = null,
@@ -107,7 +112,6 @@ export function Toolbar({
 }: Props) {
   const [expanded, setExpanded] = useState(true)
   const [labelDraft, setLabelDraft] = useState('')
-  const [newPlotBlockId, setNewPlotBlockId] = useState(defaultAddPlotBlockId ?? '')
   const [newPlotLabel, setNewPlotLabel] = useState('')
   const [newPlotRow, setNewPlotRow] = useState(1)
   const [newPlotCol, setNewPlotCol] = useState(1)
@@ -123,26 +127,27 @@ export function Toolbar({
   const t = componentTransform
 
   const addFormStats = useMemo(() => {
-    if (newPlotBlockId && blockAddStatsById?.[newPlotBlockId]) {
-      return blockAddStatsById[newPlotBlockId]
+    if (mapSelectedBlockId && blockAddStatsById?.[mapSelectedBlockId]) {
+      return blockAddStatsById[mapSelectedBlockId]
     }
     return { rows: 1, cols: 1, occupiedRows: 0, occupiedCols: 0, occupiedCells: 0, totalCells: 1 }
-  }, [newPlotBlockId, blockAddStatsById])
+  }, [mapSelectedBlockId, blockAddStatsById])
+
+  const selectedBlockMenuLabel = useMemo(() => {
+    const o = blockSelectOptions.find((x) => x.id === mapSelectedBlockId)
+    return o?.label ?? mapSelectedBlockId ?? ''
+  }, [blockSelectOptions, mapSelectedBlockId])
 
   useEffect(() => {
     setLabelDraft(editableLabelText ?? '')
   }, [editableLabelText])
 
   useEffect(() => {
-    if (defaultAddPlotBlockId) setNewPlotBlockId(defaultAddPlotBlockId)
-  }, [defaultAddPlotBlockId])
-
-  useEffect(() => {
     setNewPlotRow(1)
     setNewPlotCol(1)
     setDeleteRow(1)
     setDeleteCol(1)
-  }, [newPlotBlockId])
+  }, [mapSelectedBlockId])
 
   useEffect(() => {
     setSelectedPlotDraft(selectedPlotNumber ?? '')
@@ -180,9 +185,12 @@ export function Toolbar({
           onWheel={handleWheelScroll}
         >
         <div className="flex items-start justify-between gap-2">
-          <div>
-            <p className="text-[11px] font-bold text-slate-700 leading-snug">جارٍ السحب للتحريك · العجلة للتكبير والتصغير</p>
-          </div>
+          <ul className="text-[10px] text-slate-600 leading-snug min-w-0 list-disc space-y-1 ps-3 marker:text-slate-400">
+            <li>سحب للتحريك</li>
+            <li>عجلة للتكبير</li>
+            <li>Ctrl/Cmd+نقر تحديد سريع</li>
+            <li>Ctrl/Cmd+سحب على الخلفية تحديد مستطيل</li>
+          </ul>
           <button
             type="button"
             onClick={() => setExpanded(false)}
@@ -192,84 +200,87 @@ export function Toolbar({
             طيّ
           </button>
         </div>
-        <p className="text-[10px] text-slate-500 leading-relaxed">
-          حرّك المؤشر فوق الوحدات لعرض تفاصيلها ثم انقر لفتح الإجراءات. Ctrl/Cmd+نقر على وحدة يحددها دون فتح التفاصيل. بدون زر التحكم يمكن السحب والعجلة فوق العناصر أيضًا؛ مع الضغط على التحكم يُفضّل تحديد/سحب الطبقات.
-          Ctrl/Cmd+اسحب على الخلفية الخضراء لرسم مستطيل تحديد (مثل مستكشف الملفات)، ثم حرّك الدوران أو القياس من الشريط لجميع ما داخل الإطار. انقر فوق مساحة فارغة بدون Ctrl لإلغاء التحديد.
-        </p>
-        <div className="flex flex-wrap gap-1">
-          <button
-            type="button"
-            onClick={onZoomIn}
-            className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-bold text-white hover:bg-slate-800"
-            aria-label="تكبير"
-          >
-            +
-          </button>
-          <button
-            type="button"
-            onClick={onZoomOut}
-            className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-bold text-white hover:bg-slate-800"
-            aria-label="تصغير"
-          >
-            −
-          </button>
-          <button
-            type="button"
-            onClick={onFitView}
-            className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
-          >
-            ملاءمة العرض
-          </button>
-          <button
-            type="button"
-            onClick={onUndo}
-            disabled={!canUndo}
-            className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
-          >
-            تراجع
-          </button>
-          <button
-            type="button"
-            onClick={onRedo}
-            disabled={!canRedo}
-            className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
-          >
-            إعادة
-          </button>
-          <button
-            type="button"
-            onClick={onExportDisk}
-            className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-100"
-          >
-            تصدير ملف
-          </button>
-          {isAdmin && !previewMode && (
-            <>
-              <button
-                type="button"
-                onClick={onPublishDesign}
-                className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-900 hover:bg-amber-100"
-              >
-                نشر التصميم
-              </button>
-              <button
-                type="button"
-                onClick={onReseedPlotState}
-                className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-900 hover:bg-rose-100"
-              >
-                إعادة حالات
-              </button>
-            </>
-          )}
-          {isAdmin && (
+
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap gap-1">
             <button
               type="button"
-              onClick={onImportDisk}
+              onClick={onZoomIn}
+              className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-bold text-white hover:bg-slate-800"
+              aria-label="تكبير"
+            >
+              +
+            </button>
+            <button
+              type="button"
+              onClick={onZoomOut}
+              className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-bold text-white hover:bg-slate-800"
+              aria-label="تصغير"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              onClick={onFitView}
               className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
             >
-              استيراد ملف
+              ملاءمة العرض
             </button>
-          )}
+          </div>
+          <div className="flex flex-wrap gap-1">
+            <button
+              type="button"
+              onClick={onUndo}
+              disabled={!canUndo}
+              className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+            >
+              تراجع
+            </button>
+            <button
+              type="button"
+              onClick={onRedo}
+              disabled={!canRedo}
+              className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+            >
+              إعادة
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            <button
+              type="button"
+              onClick={onExportDisk}
+              className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-100"
+            >
+              تصدير ملف
+            </button>
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={onImportDisk}
+                className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
+              >
+                استيراد ملف
+              </button>
+            )}
+            {isAdmin && !previewMode && (
+              <>
+                <button
+                  type="button"
+                  onClick={onPublishDesign}
+                  className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-900 hover:bg-amber-100"
+                >
+                  نشر التصميم
+                </button>
+                <button
+                  type="button"
+                  onClick={onReseedPlotState}
+                  className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-900 hover:bg-rose-100"
+                >
+                  إعادة حالات
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
         <div className="border-t border-slate-100 pt-2 space-y-2">
@@ -299,9 +310,7 @@ export function Toolbar({
                   className="w-full accent-indigo-600"
                   aria-label="ارتفاع شريط عنوان البلوك"
                 />
-                <p className="text-[9px] text-slate-500 leading-snug">
-                  يضبط سُمك الشريط فوق الصف/العمود الأول (أعرض من خانة الوحدة قليلًا افتراضيًا).
-                </p>
+                <p className="text-[9px] text-slate-500 leading-snug">سُمك الشريط فوق الصف أو العمود الأول.</p>
               </div>
             )}
             {selectionFontSize != null && onSetSelectionFontSize && (
@@ -338,9 +347,7 @@ export function Toolbar({
                     +
                   </button>
                 </div>
-                <p className="text-[9px] text-slate-500 leading-snug">
-                  يُحفظ مع الملف ولا يتشوّه النص عند تغيير مقياس أو تمطيط العنصر.
-                </p>
+                <p className="text-[9px] text-slate-500 leading-snug">يُحفظ مع الملف مع التحجيم.</p>
               </div>
             )}
             {selectionSubLabelFontSize != null && onSetSubLabelFontSize && (
@@ -379,187 +386,9 @@ export function Toolbar({
                 </div>
               </div>
             )}
-            <div className="grid grid-cols-2 gap-1">
-              <button
-                type="button"
-                onClick={() =>
-                  setPendingAction({
-                    title: 'حذف العناصر المحددة',
-                    message: 'سيتم حذف كل العناصر المحددة من التصميم الحالي.',
-                    confirmLabel: 'حذف',
-                    run: onDeleteSelected,
-                  })
-                }
-                disabled={!hasSelection}
-                className="rounded-lg border border-rose-200 bg-rose-50 py-1.5 text-[11px] font-bold text-rose-700 hover:bg-rose-100 disabled:opacity-40"
-              >
-                حذف المحدد
-              </button>
-              <div className="col-span-2 rounded-lg border border-slate-200 p-2 space-y-1">
-                <p className="text-[10px] text-slate-500">إضافة وحدة</p>
-                <div className="grid grid-cols-2 gap-1">
-                  <select
-                    value={newPlotBlockId}
-                    onChange={(e) => setNewPlotBlockId(e.target.value)}
-                    className="rounded-md border border-slate-200 px-1.5 py-1 text-[11px] text-slate-700"
-                  >
-                    {blockOptions.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="text"
-                    value={newPlotLabel}
-                    onChange={(e) => setNewPlotLabel(e.target.value)}
-                    className="rounded-md border border-slate-200 px-1.5 py-1 text-[11px] text-slate-700"
-                    placeholder="رقم/اسم الوحدة"
-                  />
-                  <div className="space-y-0.5">
-                    <p className="text-[10px] text-slate-500">رقم الصف</p>
-                    <input
-                      type="number"
-                      min={1}
-                      max={Math.max(1, addFormStats?.rows ?? 1)}
-                      value={newPlotRow}
-                      onChange={(e) => setNewPlotRow(Math.max(1, Number(e.target.value) || 1))}
-                      className="w-full rounded-md border border-slate-200 px-1.5 py-1 text-[11px] text-slate-700"
-                      placeholder="مثال: 1"
-                    />
-                  </div>
-                  <div className="space-y-0.5">
-                    <p className="text-[10px] text-slate-500">رقم العمود</p>
-                    <input
-                      type="number"
-                      min={1}
-                      max={Math.max(1, addFormStats?.cols ?? 1)}
-                      value={newPlotCol}
-                      onChange={(e) => setNewPlotCol(Math.max(1, Number(e.target.value) || 1))}
-                      className="w-full rounded-md border border-slate-200 px-1.5 py-1 text-[11px] text-slate-700"
-                      placeholder="مثال: 1"
-                    />
-                  </div>
-                </div>
-                <div className="space-y-0.5 text-[10px] text-slate-500">
-                  <div className="flex items-center justify-between">
-                    <span>الشبكة المعتمدة: {addFormStats?.rows ?? 1} صف × {addFormStats?.cols ?? 1} عمود</span>
-                    <div className="flex gap-1">
-                      <button
-                        type="button"
-                        onClick={() => newPlotBlockId && onGrowBlockGrid(newPlotBlockId, 1, 0)}
-                        className="rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 hover:bg-slate-50"
-                      >
-                        +صف
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => newPlotBlockId && onGrowBlockGrid(newPlotBlockId, 0, 1)}
-                        className="rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 hover:bg-slate-50"
-                      >
-                        +عمود
-                      </button>
-                    </div>
-                  </div>
-                  <span>
-                    المشغول فعليًا: {addFormStats.occupiedRows} صف × {addFormStats.occupiedCols} عمود
-                    {' · '}
-                    خلايا مشغولة: {addFormStats.occupiedCells}/{addFormStats.totalCells}
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 gap-1">
-                  <input
-                    type="number"
-                    min={1}
-                    max={Math.max(1, addFormStats?.rows ?? 1)}
-                    value={deleteRow}
-                    onChange={(e) => setDeleteRow(Math.max(1, Number(e.target.value) || 1))}
-                    className="rounded-md border border-slate-200 px-1.5 py-1 text-[11px] text-slate-700"
-                    placeholder="حذف صف"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!newPlotBlockId) return
-                      setPendingAction({
-                        title: 'حذف صف من البلوك',
-                        message: `سيتم حذف الصف ${deleteRow} من ${newPlotBlockId} مع كل خلاياه.`,
-                        confirmLabel: 'حذف الصف',
-                        run: () => onDeleteBlockRow(newPlotBlockId, deleteRow),
-                      })
-                    }}
-                    className="rounded-md border border-rose-200 bg-rose-50 py-1 text-[11px] font-bold text-rose-700 hover:bg-rose-100"
-                  >
-                    حذف صف
-                  </button>
-                  <input
-                    type="number"
-                    min={1}
-                    max={Math.max(1, addFormStats?.cols ?? 1)}
-                    value={deleteCol}
-                    onChange={(e) => setDeleteCol(Math.max(1, Number(e.target.value) || 1))}
-                    className="rounded-md border border-slate-200 px-1.5 py-1 text-[11px] text-slate-700"
-                    placeholder="حذف عمود"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!newPlotBlockId) return
-                      setPendingAction({
-                        title: 'حذف عمود من البلوك',
-                        message: `سيتم حذف العمود ${deleteCol} من ${newPlotBlockId} مع كل خلاياه.`,
-                        confirmLabel: 'حذف العمود',
-                        run: () => onDeleteBlockCol(newPlotBlockId, deleteCol),
-                      })
-                    }}
-                    className="rounded-md border border-rose-200 bg-rose-50 py-1 text-[11px] font-bold text-rose-700 hover:bg-rose-100"
-                  >
-                    حذف عمود
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  disabled={!newPlotBlockId}
-                  onClick={() => {
-                    onAddPlot(newPlotBlockId, newPlotLabel.trim(), newPlotRow, newPlotCol)
-                    setNewPlotLabel('')
-                  }}
-                  className="w-full rounded-md border border-slate-200 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
-                >
-                  إضافة وحدة
-                </button>
-              </div>
-              <button
-                type="button"
-                onClick={onAddRoad}
-                className="rounded-lg border border-slate-200 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
-              >
-                إضافة شارع
-              </button>
-              <button
-                type="button"
-                onClick={onAddBlock}
-                className="rounded-lg border border-slate-200 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
-              >
-                إضافة بلوك
-              </button>
-              <button
-                type="button"
-                onClick={onAddFacility}
-                className="rounded-lg border border-slate-200 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
-              >
-                إضافة مرفق
-              </button>
-              <button
-                type="button"
-                onClick={onAddLabel}
-                className="rounded-lg border border-slate-200 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
-              >
-                إضافة نص
-              </button>
-            </div>
             {editableLabelText !== null && (
               <div className="space-y-1">
+                <p className="text-[10px] font-bold text-slate-500">نص الملصق</p>
                 <input
                   type="text"
                   value={labelDraft}
@@ -578,7 +407,7 @@ export function Toolbar({
             )}
             {selectedPlotNumber !== null && selectedPlotNumber !== undefined && (
               <div className="space-y-1">
-                <p className="text-[10px] text-slate-500">تحرير الخلية المحددة</p>
+                <p className="text-[10px] font-bold text-slate-500">الخلية المحددة</p>
                 <input
                   type="text"
                   value={selectedPlotDraft}
@@ -586,11 +415,11 @@ export function Toolbar({
                   className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-700"
                   placeholder="رقم/اسم الخلية"
                 />
-                <div className="grid grid-cols-2 gap-1">
+                <div className="flex flex-wrap gap-1">
                   <button
                     type="button"
                     onClick={() => onUpdateSelectedPlotNumber(selectedPlotDraft.trim())}
-                    className="rounded-lg border border-emerald-200 bg-emerald-50 py-1.5 text-[11px] font-bold text-emerald-700 hover:bg-emerald-100"
+                    className="min-w-0 flex-1 rounded-lg border border-emerald-200 bg-emerald-50 py-1.5 text-[11px] font-bold text-emerald-700 hover:bg-emerald-100"
                   >
                     حفظ الخلية
                   </button>
@@ -604,21 +433,203 @@ export function Toolbar({
                         run: onDeleteSelectedPlot,
                       })
                     }
-                    className="rounded-lg border border-rose-200 bg-rose-50 py-1.5 text-[11px] font-bold text-rose-700 hover:bg-rose-100"
+                    className="min-w-0 flex-1 rounded-lg border border-rose-200 bg-rose-50 py-1.5 text-[11px] font-bold text-rose-700 hover:bg-rose-100"
                   >
                     حذف الخلية
                   </button>
                 </div>
               </div>
             )}
+            <button
+              type="button"
+              onClick={() =>
+                setPendingAction({
+                  title: 'حذف العناصر المحددة',
+                  message: 'سيتم حذف كل العناصر المحددة من التصميم الحالي.',
+                  confirmLabel: 'حذف',
+                  run: onDeleteSelected,
+                })
+              }
+              disabled={!hasSelection}
+              className="w-full rounded-lg border border-rose-200 bg-rose-50 py-1.5 text-[11px] font-bold text-rose-700 hover:bg-rose-100 disabled:opacity-40"
+            >
+              حذف المحدد
+            </button>
           </div>
+
+          <div className="border-t border-slate-100 pt-2 space-y-2">
+            <p className="text-[10px] font-bold text-slate-500">إضافة إلى الخريطة</p>
+            {mapSelectedBlockId ? (
+              <>
+                <div className="rounded-lg border border-slate-200 p-2 space-y-1.5">
+                  <p className="text-[10px] font-bold text-slate-600">إضافة وحدة</p>
+                  <p className="text-[9px] text-slate-500 leading-snug">
+                    البلوك: <span className="font-semibold text-slate-600">{selectedBlockMenuLabel}</span>
+                  </p>
+                  <div className="grid grid-cols-2 gap-1">
+                    <input
+                      type="text"
+                      value={newPlotLabel}
+                      onChange={(e) => setNewPlotLabel(e.target.value)}
+                      className="rounded-md border border-slate-200 px-1.5 py-1 text-[11px] text-slate-700 col-span-2"
+                      placeholder="رقم/اسم الوحدة"
+                    />
+                    <div className="space-y-0.5">
+                      <p className="text-[10px] text-slate-500">الصف</p>
+                      <input
+                        type="number"
+                        min={1}
+                        max={Math.max(1, addFormStats?.rows ?? 1)}
+                        value={newPlotRow}
+                        onChange={(e) => setNewPlotRow(Math.max(1, Number(e.target.value) || 1))}
+                        className="w-full rounded-md border border-slate-200 px-1.5 py-1 text-[11px] text-slate-700"
+                      />
+                    </div>
+                    <div className="space-y-0.5">
+                      <p className="text-[10px] text-slate-500">العمود</p>
+                      <input
+                        type="number"
+                        min={1}
+                        max={Math.max(1, addFormStats?.cols ?? 1)}
+                        value={newPlotCol}
+                        onChange={(e) => setNewPlotCol(Math.max(1, Number(e.target.value) || 1))}
+                        className="w-full rounded-md border border-slate-200 px-1.5 py-1 text-[11px] text-slate-700"
+                      />
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onAddPlot(mapSelectedBlockId, newPlotLabel.trim(), newPlotRow, newPlotCol)
+                      setNewPlotLabel('')
+                    }}
+                    className="w-full rounded-md border border-slate-200 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+                  >
+                    إضافة وحدة
+                  </button>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 p-2 space-y-1.5">
+                  <p className="text-[10px] font-bold text-slate-600">شبكة البلوك المحدد</p>
+                  <p className="text-[9px] text-slate-500 leading-snug">
+                    توسيع الشبكة أو حذف صف/عمود كامل لهذا البلوك المحدد على الخريطة.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => onGrowBlockGrid(mapSelectedBlockId, 1, 0)}
+                      className="rounded-md border border-slate-200 px-2 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+                    >
+                      +صف
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onGrowBlockGrid(mapSelectedBlockId, 0, 1)}
+                      className="rounded-md border border-slate-200 px-2 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+                    >
+                      +عمود
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-500">
+                    {addFormStats?.rows ?? 1} صف × {addFormStats?.cols ?? 1} عمود · مشغول {addFormStats.occupiedCells}/
+                    {addFormStats.totalCells}
+                  </p>
+                  <div className="flex flex-wrap gap-1 items-center">
+                    <span className="text-[10px] text-slate-500 shrink-0">حذف صف</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={Math.max(1, addFormStats?.rows ?? 1)}
+                      value={deleteRow}
+                      onChange={(e) => setDeleteRow(Math.max(1, Number(e.target.value) || 1))}
+                      className="w-14 rounded-md border border-slate-200 px-1.5 py-1 text-[11px] text-slate-700"
+                      aria-label="رقم الصف للحذف"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPendingAction({
+                          title: 'حذف صف من البلوك',
+                          message: `سيتم حذف الصف ${deleteRow} من ${selectedBlockMenuLabel} مع كل خلاياه.`,
+                          confirmLabel: 'حذف الصف',
+                          run: () => onDeleteBlockRow(mapSelectedBlockId, deleteRow),
+                        })
+                      }
+                      className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] font-bold text-rose-700 hover:bg-rose-100"
+                    >
+                      احذف الصف
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-1 items-center">
+                    <span className="text-[10px] text-slate-500 shrink-0">حذف عمود</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={Math.max(1, addFormStats?.cols ?? 1)}
+                      value={deleteCol}
+                      onChange={(e) => setDeleteCol(Math.max(1, Number(e.target.value) || 1))}
+                      className="w-14 rounded-md border border-slate-200 px-1.5 py-1 text-[11px] text-slate-700"
+                      aria-label="رقم العمود للحذف"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPendingAction({
+                          title: 'حذف عمود من البلوك',
+                          message: `سيتم حذف العمود ${deleteCol} من ${selectedBlockMenuLabel} مع كل خلاياه.`,
+                          confirmLabel: 'حذف العمود',
+                          run: () => onDeleteBlockCol(mapSelectedBlockId, deleteCol),
+                        })
+                      }
+                      className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] font-bold text-rose-700 hover:bg-rose-100"
+                    >
+                      احذف العمود
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : null}
+
+            <div className="flex flex-wrap gap-1">
+              <button
+                type="button"
+                onClick={onAddRoad}
+                className="rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+              >
+                إضافة شارع
+              </button>
+              <button
+                type="button"
+                onClick={onAddBlock}
+                className="rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+              >
+                إضافة بلوك
+              </button>
+              <button
+                type="button"
+                onClick={onAddFacility}
+                className="rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+              >
+                إضافة مرفق
+              </button>
+              <button
+                type="button"
+                onClick={onAddLabel}
+                className="rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+              >
+                إضافة نص
+              </button>
+            </div>
+          </div>
+          <div className="border-t border-slate-100 pt-2 space-y-2">
+            <p className="text-[10px] font-bold text-slate-500">تحويل العنصر المحدد</p>
           {selectionCount > 1 && (
             <p className="text-[10px] text-slate-400 leading-snug">
               الأشرطة تعرض قيم أول عنصر؛ التعديل يطبَّق على كل المحددين.
             </p>
           )}
           {!hasSelection && (
-            <p className="text-[10px] text-slate-400">حدد عنصرًا على الخريطة لتعديل الدوران والمقياس والإزاحة.</p>
+            <p className="text-[10px] text-slate-400">حدد عنصرًا على الخريطة لتعديل الدوران والمقياس.</p>
           )}
           <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
             <span className="font-semibold">الدوران</span>
@@ -634,62 +645,38 @@ export function Toolbar({
             />
             <span className="text-[10px] text-slate-500">{t.rotationDeg}°</span>
           </label>
-          <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
-            <span className="font-semibold">عرض العنصر</span>
-            <input
-              type="range"
-              min={0.25}
-              max={3}
-              step={0.05}
-              value={t.scaleX}
-              disabled={!hasSelection}
-              onChange={(e) => onPatchSelected({ scaleX: Number(e.target.value) })}
-              className="mt-1 w-full accent-slate-900 disabled:opacity-40"
-            />
-            <span className="text-[10px] text-slate-500">×{t.scaleX.toFixed(2)}</span>
-          </label>
-          <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
-            <span className="font-semibold">ارتفاع العنصر</span>
-            <input
-              type="range"
-              min={0.25}
-              max={3}
-              step={0.05}
-              value={t.scaleY}
-              disabled={!hasSelection}
-              onChange={(e) => onPatchSelected({ scaleY: Number(e.target.value) })}
-              className="mt-1 w-full accent-slate-900 disabled:opacity-40"
-            />
-            <span className="text-[10px] text-slate-500">×{t.scaleY.toFixed(2)}</span>
-          </label>
-          <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
-            <span className="font-semibold">إزاحة أفقية</span>
-            <input
-              type="range"
-              min={-400}
-              max={400}
-              step={2}
-              value={t.x}
-              disabled={!hasSelection}
-              onChange={(e) => onPatchSelected({ x: Number(e.target.value) })}
-              className="mt-1 w-full accent-slate-900 disabled:opacity-40"
-            />
-            <span className="text-[10px] text-slate-500">{t.x} بكسل</span>
-          </label>
-          <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
-            <span className="font-semibold">إزاحة رأسية</span>
-            <input
-              type="range"
-              min={-400}
-              max={400}
-              step={2}
-              value={t.y}
-              disabled={!hasSelection}
-              onChange={(e) => onPatchSelected({ y: Number(e.target.value) })}
-              className="mt-1 w-full accent-slate-900 disabled:opacity-40"
-            />
-            <span className="text-[10px] text-slate-500">{t.y} بكسل</span>
-          </label>
+          {!hideElementScaleSliders && (
+            <>
+              <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
+                <span className="font-semibold">عرض العنصر</span>
+                <input
+                  type="range"
+                  min={0.25}
+                  max={3}
+                  step={0.05}
+                  value={t.scaleX}
+                  disabled={!hasSelection}
+                  onChange={(e) => onPatchSelected({ scaleX: Number(e.target.value) })}
+                  className="mt-1 w-full accent-slate-900 disabled:opacity-40"
+                />
+                <span className="text-[10px] text-slate-500">×{t.scaleX.toFixed(2)}</span>
+              </label>
+              <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
+                <span className="font-semibold">ارتفاع العنصر</span>
+                <input
+                  type="range"
+                  min={0.25}
+                  max={3}
+                  step={0.05}
+                  value={t.scaleY}
+                  disabled={!hasSelection}
+                  onChange={(e) => onPatchSelected({ scaleY: Number(e.target.value) })}
+                  className="mt-1 w-full accent-slate-900 disabled:opacity-40"
+                />
+                <span className="text-[10px] text-slate-500">×{t.scaleY.toFixed(2)}</span>
+              </label>
+            </>
+          )}
           <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
             <span className="font-semibold">الترتيب الطبقي (Z)</span>
             <input
@@ -706,6 +693,7 @@ export function Toolbar({
               الحالي: {zPosition} (من 0 إلى {zMax})
             </span>
           </label>
+          </div>
         </div>
         </div>
       </div>
