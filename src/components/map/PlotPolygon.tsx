@@ -57,7 +57,8 @@ export const PlotPolygon = memo(
     const vs = Math.max(0.04, viewportScale)
     const sx = Math.max(0.04, inverseScaleX)
     const sy = Math.max(0.04, inverseScaleY)
-    const fontPx = Math.max(5, Math.min(20, 9 / vs))
+    const baseFs = plot.labelFontSize ?? 9
+    const fontPx = Math.max(5, Math.min(36, baseFs / vs))
 
     return (
       <g

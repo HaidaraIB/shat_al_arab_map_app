@@ -45,6 +45,12 @@ type Props = {
   /** 22–65 = % of one cell step along strip normal; null when no block selected. */
   selectedBlockLabelStripPercent?: number | null
   onSetBlockLabelStripPercent?: (percent: number) => void
+  /** Map-units font size for the current text selection (plot, road, block title, free label, facility title). */
+  selectionFontSize?: number | null
+  onSetSelectionFontSize?: (size: number) => void
+  /** Facility subtitle only; null when not applicable. */
+  selectionSubLabelFontSize?: number | null
+  onSetSubLabelFontSize?: (size: number) => void
 }
 
 /** لوحة أدوات الخريطة — العربية فقط، مع طيّ وإظهار. */
@@ -86,6 +92,10 @@ export function Toolbar({
   onFitView,
   selectedBlockLabelStripPercent = null,
   onSetBlockLabelStripPercent,
+  selectionFontSize = null,
+  onSetSelectionFontSize,
+  selectionSubLabelFontSize = null,
+  onSetSubLabelFontSize,
 }: Props) {
   const [expanded, setExpanded] = useState(true)
   const [labelDraft, setLabelDraft] = useState('')
@@ -168,8 +178,8 @@ export function Toolbar({
           </button>
         </div>
         <p className="text-[10px] text-slate-500 leading-relaxed">
-          حرّك المؤشر فوق الوحدات لعرض تفاصيلها ثم انقر لفتح الإجراءات. استخدم زر التحكم لتحديد/إلغاء تحديد العناصر، وبعد التحديد يمكنك سحب العناصر المحددة مباشرة.
-          انقر على مساحة فارغة لإلغاء التحديد.
+          حرّك المؤشر فوق الوحدات لعرض تفاصيلها ثم انقر لفتح الإجراءات. Ctrl/Cmd+نقر على وحدة يحددها دون فتح التفاصيل. بدون زر التحكم يمكن السحب والعجلة فوق العناصر أيضًا؛ مع الضغط على التحكم يُفضّل تحديد/سحب الطبقات.
+          Ctrl/Cmd+اسحب على الخلفية الخضراء لرسم مستطيل تحديد (مثل مستكشف الملفات)، ثم حرّك الدوران أو القياس من الشريط لجميع ما داخل الإطار. انقر فوق مساحة فارغة بدون Ctrl لإلغاء التحديد.
         </p>
         <div className="flex flex-wrap gap-1">
           <button
@@ -264,6 +274,81 @@ export function Toolbar({
                 <p className="text-[9px] text-slate-500 leading-snug">
                   يضبط سُمك الشريط فوق الصف/العمود الأول (أعرض من خانة الوحدة قليلًا افتراضيًا).
                 </p>
+              </div>
+            )}
+            {selectionFontSize != null && onSetSelectionFontSize && (
+              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-bold text-slate-700">حجم الخط (وحدات الخريطة)</span>
+                  <span className="text-[10px] font-bold tabular-nums text-slate-600">{selectionFontSize}</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => onSetSelectionFontSize(selectionFontSize - 1)}
+                    className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                    aria-label="تصغير الخط"
+                  >
+                    −
+                  </button>
+                  <input
+                    type="range"
+                    min={4}
+                    max={64}
+                    step={1}
+                    value={selectionFontSize}
+                    onChange={(e) => onSetSelectionFontSize(Number(e.target.value))}
+                    className="min-w-0 flex-1 accent-indigo-600"
+                    aria-label="حجم الخط"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => onSetSelectionFontSize(selectionFontSize + 1)}
+                    className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                    aria-label="تكبير الخط"
+                  >
+                    +
+                  </button>
+                </div>
+                <p className="text-[9px] text-slate-500 leading-snug">
+                  يُحفظ مع الملف ولا يتشوّه النص عند تغيير مقياس أو تمطيط العنصر.
+                </p>
+              </div>
+            )}
+            {selectionSubLabelFontSize != null && onSetSubLabelFontSize && (
+              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-bold text-slate-700">حجم السطر الثاني (المرفق)</span>
+                  <span className="text-[10px] font-bold tabular-nums text-slate-600">{selectionSubLabelFontSize}</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => onSetSubLabelFontSize(selectionSubLabelFontSize - 1)}
+                    className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                    aria-label="تصغير السطر الثاني"
+                  >
+                    −
+                  </button>
+                  <input
+                    type="range"
+                    min={4}
+                    max={40}
+                    step={1}
+                    value={selectionSubLabelFontSize}
+                    onChange={(e) => onSetSubLabelFontSize(Number(e.target.value))}
+                    className="min-w-0 flex-1 accent-indigo-600"
+                    aria-label="حجم السطر الثاني"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => onSetSubLabelFontSize(selectionSubLabelFontSize + 1)}
+                    className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                    aria-label="تكبير السطر الثاني"
+                  >
+                    +
+                  </button>
+                </div>
               </div>
             )}
             <div className="grid grid-cols-2 gap-1">

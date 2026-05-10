@@ -69,6 +69,7 @@ export default function App() {
   const [editingUnitIdInTable, setEditingUnitIdInTable] = useState<string | null>(null);
   const [tempPriceInTable, setTempPriceInTable] = useState<number | string>('');
   const selectedPlotIdOnMap = useMapStore((s) => s.selectedPlotId);
+  const plotSelectionOpensUnitModal = useMapStore((s) => s.plotSelectionOpensUnitModal);
   const hoveredPlotIdOnMap = useMapStore((s) => s.hoveredPlotId);
   const mapData = useMapStore((s) => s.map);
   const updateMapPlot = useMapStore((s) => s.updatePlot);
@@ -145,16 +146,22 @@ export default function App() {
   }, [hoveredPlotIdOnMap, selectedPlotIdOnMap, unitById]);
 
   useEffect(() => {
-    if (!selectedPlotIdOnMap) return;
+    if (!selectedPlotIdOnMap || !plotSelectionOpensUnitModal) return;
     const u = unitById.get(selectedPlotIdOnMap);
+    useMapStore.setState({ plotSelectionOpensUnitModal: false });
     if (u) openUnitModal(u);
-  }, [selectedPlotIdOnMap, unitById]);
+  }, [selectedPlotIdOnMap, plotSelectionOpensUnitModal, unitById]);
 
   const filteredData = useMemo(() => {
     return data.map(block => ({
       ...block,
       units: block.units.filter(u => {
-        const matchesSearch = u.id.toLowerCase().includes(searchTerm.toLowerCase());
+        const q = searchTerm.toLowerCase();
+        const matchesSearch =
+          u.id.toLowerCase().includes(q) ||
+          (u.propertyCode?.toLowerCase().includes(q) ?? false) ||
+          u.number.toLowerCase().includes(q) ||
+          u.block.toLowerCase().includes(q);
         const matchesFilter = filter === 'all' || u.status === filter;
         return matchesSearch && matchesFilter;
       })
@@ -851,8 +858,13 @@ export default function App() {
               </div>
 
               <div className="grid grid-cols-2 gap-4 py-4 border-y border-slate-100">
-                <DetailRow label="كود العقار" value={selectedUnit.id} />
-                <DetailRow label="التصنيف" value={`تصنيف ${selectedUnit.category || 'N/A'}`} />
+                <DetailRow label="كود العقار" value={selectedUnit.propertyCode ?? (selectedUnit.number || selectedUnit.id)} />
+                <DetailRow
+                  label="التصنيف"
+                  value={
+                    selectedUnit.category ? `تصنيف ${selectedUnit.category}` : 'تصنيف غير محدد'
+                  }
+                />
                 <DetailRow label="النوع" value={selectedUnit.unitType || 'عادي'} />
                 <DetailRow label="المساحة" value={`${selectedUnit.area || 200} م²`} />
                 <DetailRow label="الحالة" value={selectedUnit.status === UnitStatus.SOLD ? 'محجوز نهائياً' : selectedUnit.status === UnitStatus.RESERVED ? 'حجز مبدئي' : 'متاح'} />
@@ -886,7 +898,14 @@ export default function App() {
                   ) : (
                     <div className="flex items-center justify-between group">
                       <p className="text-lg font-black text-slate-800 leading-tight tracking-tight">
-                        {selectedUnit.price?.toLocaleString()} <span className="text-[10px] opacity-40">IQD</span>
+                        {selectedUnit.price != null && !Number.isNaN(selectedUnit.price) ? (
+                          <>
+                            {selectedUnit.price.toLocaleString()}{' '}
+                            <span className="text-[10px] opacity-40">IQD</span>
+                          </>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
                       </p>
                       {currentUser === UserRole.ADMIN && (
                         <button 

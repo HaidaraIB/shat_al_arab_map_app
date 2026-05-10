@@ -20,7 +20,10 @@ export interface User {
 
 export interface Unit {
   id: string;
+  /** Block title for display (marker text or block.label), not necessarily the internal block id. */
   block: string;
+  /** Human property code: typically "BlockLabel-unitLabel" matching map labels; falls back to unit number. */
+  propertyCode?: string;
   number: string;
   status: UnitStatus;
   price?: number;

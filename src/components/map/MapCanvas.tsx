@@ -10,8 +10,15 @@ import {
   polygonCentroid,
   pointsBoundingBox,
 } from '../../utils/geometry'
-import { componentGroupTransform, pointsToSvgPoints, screenToSvgPoint } from '../../utils/svg'
+import {
+  componentGroupTransform,
+  pointsToSvgPoints,
+  resolvedComponentScale,
+  screenToSvgPoint,
+  undoComponentScaleAt,
+} from '../../utils/svg'
 import { mapContentSheetSize } from '../../utils/mapContentSheet'
+import { categoryForNewPlotInBlock } from '../../utils/legacyBlocksFromMap'
 import { Label } from './Label'
 import { PlotPolygon } from './PlotPolygon'
 import { RoadPath } from './RoadPath'
@@ -80,6 +87,59 @@ function mergeTransform(mapCT: Record<string, ComponentTransform> | undefined, k
 function roadPivot(r: Road): { x: number; y: number } {
   const bb = pointsBoundingBox(r.points, 0)
   return { x: bb.x + bb.width / 2, y: bb.y + bb.height / 2 }
+}
+
+/** World-space axis-aligned bbox of a component’s local geometry after SVG `componentGroupTransform`. */
+function worldAabbAfterGroupTransform(
+  localMinX: number,
+  localMinY: number,
+  localMaxX: number,
+  localMaxY: number,
+  pivot: { x: number; y: number },
+  t: ComponentTransform,
+): { minX: number; minY: number; maxX: number; maxY: number } {
+  const { sx: rsx, sy: rsy } = resolvedComponentScale(t)
+  const m = new DOMMatrix()
+    .translateSelf(t.x, t.y)
+    .translateSelf(pivot.x, pivot.y)
+    .rotateSelf(t.rotationDeg)
+    .scaleSelf(rsx, rsy)
+    .translateSelf(-pivot.x, -pivot.y)
+
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  const corners = [
+    { x: localMinX, y: localMinY },
+    { x: localMaxX, y: localMinY },
+    { x: localMaxX, y: localMaxY },
+    { x: localMinX, y: localMaxY },
+  ]
+  for (const c of corners) {
+    const pt = new DOMPoint(c.x, c.y).matrixTransform(m)
+    minX = Math.min(minX, pt.x)
+    minY = Math.min(minY, pt.y)
+    maxX = Math.max(maxX, pt.x)
+    maxY = Math.max(maxY, pt.y)
+  }
+  return { minX, minY, maxX, maxY }
+}
+
+function rectsOverlapAabb(
+  a: { minX: number; minY: number; maxX: number; maxY: number },
+  b: { minX: number; minY: number; maxX: number; maxY: number },
+): boolean {
+  return !(a.maxX < b.minX || b.maxX < a.minX || a.maxY < b.minY || b.maxY < a.minY)
+}
+
+function normalizeDragRect(x1: number, y1: number, x2: number, y2: number) {
+  return {
+    minX: Math.min(x1, x2),
+    minY: Math.min(y1, y2),
+    maxX: Math.max(x1, x2),
+    maxY: Math.max(y1, y2),
+  }
 }
 
 type BlockMarkerLayout =
@@ -261,6 +321,9 @@ export function MapCanvas() {
   const [isTransformMode, setIsTransformMode] = useState(false)
   const [toast, setToast] = useState<null | { kind: 'success' | 'info'; message: string }>(null)
   const [saveDefaultConfirmOpen, setSaveDefaultConfirmOpen] = useState(false)
+  /** Rubber-band selection (map/SVG coordinates). */
+  const [marqueeBox, setMarqueeBox] = useState<null | { x: number; y: number; width: number; height: number }>(null)
+  const marqueeSessionRef = useRef<null | { pointerId: number; x1: number; y1: number; x2: number; y2: number }>(null)
 
   const map = useMapStore((s) => s.map)
   const meta = map.meta
@@ -294,6 +357,8 @@ export function MapCanvas() {
   const addLabel = useMapStore((s) => s.addLabel)
   const updateLabelText = useMapStore((s) => s.updateLabelText)
   const updateFacilityText = useMapStore((s) => s.updateFacilityText)
+  const patchMapLabel = useMapStore((s) => s.patchMapLabel)
+  const patchFacility = useMapStore((s) => s.patchFacility)
   const deleteSelectedComponents = useMapStore((s) => s.deleteSelectedComponents)
   const selectComponentsOnly = useMapStore((s) => s.selectComponentsOnly)
   const moveComponentsBy = useMapStore((s) => s.moveComponentsBy)
@@ -373,6 +438,35 @@ export function MapCanvas() {
     return () => window.clearTimeout(t)
   }, [toast])
 
+  /** While Ctrl/Meta is held, infra hit targets exclude pan/zoom so component selection/drag stays usable. */
+  const [mapTransformBlockInfra, setMapTransformBlockInfra] = useState(false)
+  useEffect(() => {
+    const syncModifiers = (e: KeyboardEvent | MouseEvent | PointerEvent) =>
+      setMapTransformBlockInfra(e.ctrlKey || e.metaKey)
+    const blur = () => setMapTransformBlockInfra(false)
+    window.addEventListener('keydown', syncModifiers)
+    window.addEventListener('keyup', syncModifiers)
+    window.addEventListener('pointermove', syncModifiers)
+    window.addEventListener('pointerdown', syncModifiers)
+    window.addEventListener('blur', blur)
+    return () => {
+      window.removeEventListener('keydown', syncModifiers)
+      window.removeEventListener('keyup', syncModifiers)
+      window.removeEventListener('pointermove', syncModifiers)
+      window.removeEventListener('pointerdown', syncModifiers)
+      window.removeEventListener('blur', blur)
+    }
+  }, [])
+
+  /** Ctrl/Meta blocks panning on empty sheet so marquee + infra drag behave like a selection layer. */
+  const mapPanZoomExcluded = useMemo(
+    () =>
+      mapTransformBlockInfra
+        ? (['map-infra-hit', 'map-infra-select', 'map-infra-marquee-root'] as const)
+        : [],
+    [mapTransformBlockInfra],
+  )
+
   const primaryTransform = useMemo(() => {
     const k = selectedKeys[0]
     if (!k) return defaultComponentTransform()
@@ -447,26 +541,19 @@ export function MapCanvas() {
     [clickToggleComponent, moveComponentsBy],
   )
 
-  const onSvgBackgroundPointerDown = useCallback(
-    (e: React.PointerEvent<SVGSVGElement>) => {
-      const el = e.target as Element
-      if (el.closest('.map-infra-select')) return
-      clearComponentSelection()
-      selectPlot(null)
-    },
-    [clearComponentSelection, selectPlot],
-  )
-
   const handlePlotClick = useCallback(
     (plot: Plot, e: React.MouseEvent<SVGGElement>) => {
       e.stopPropagation()
-      // Keep Ctrl/Cmd reserved for transform selection mode; avoid accidental modal open.
-      if (e.ctrlKey || e.metaKey) return
       // Second click of a double-click is ignored here; double-click selects the parent block instead.
       if (e.detail >= 2) return
+      if (e.ctrlKey || e.metaKey) {
+        clearComponentSelection()
+        selectPlot(plot.id, { openUnitModal: false })
+        return
+      }
       selectPlot(plot.id)
     },
-    [selectPlot],
+    [clearComponentSelection, selectPlot],
   )
 
   const handlePlotDoubleClick = useCallback(
@@ -602,6 +689,7 @@ export function MapCanvas() {
   const renderRoad = (r: Road) => {
     const key = roadKey(r.id)
     const t = mergeTransform(ct, key)
+    const { sx, sy } = resolvedComponentScale(t)
     const pivot = roadPivot(r)
     const tf = componentGroupTransform(pivot.x, pivot.y, t)
     const sel = selectedKeys.includes(key)
@@ -616,7 +704,11 @@ export function MapCanvas() {
         onDoubleClick={(e) => selectComponentExclusive(e, key)}
       >
         <RoadPath road={r} selected={sel} />
-        {lbl && <Label label={lbl} className="pointer-events-none fill-slate-700" />}
+        {lbl && (
+          <g transform={undoComponentScaleAt(lbl.position.x, lbl.position.y, sx, sy)} className="pointer-events-none">
+            <Label label={lbl} className="pointer-events-none fill-slate-700" />
+          </g>
+        )}
       </g>
     )
   }
@@ -673,6 +765,7 @@ export function MapCanvas() {
     const cx = pivot.x
     const cy = pivot.y
     const tLbl = mergeTransform(ct, keyLbl)
+    const { sx: lsx, sy: lsy } = resolvedComponentScale(tLbl)
     const tfLbl = componentGroupTransform(cx, cy, tLbl)
     const selLbl = selectedKeys.includes(keyLbl)
     const bbLbl = facilityLabelBounds(f, cx, cy)
@@ -692,20 +785,36 @@ export function MapCanvas() {
           fill="transparent"
           className="map-infra-hit"
         />
-        <text
-          x={cx}
-          y={cy}
-          textAnchor="middle"
-          dominantBaseline="central"
-          className="pointer-events-none fill-slate-800 text-[9px] font-bold uppercase"
-        >
-          {f.label}
-        </text>
-        {f.subLabel && (
-          <text x={cx} y={cy + 12} textAnchor="middle" className="pointer-events-none fill-slate-500 text-[7px] font-semibold">
-            {f.subLabel}
+        <g transform={undoComponentScaleAt(cx, cy, lsx, lsy)} className="pointer-events-none">
+          <text
+            x={cx}
+            y={cy}
+            textAnchor="middle"
+            dominantBaseline="central"
+            className="pointer-events-none fill-slate-800 font-bold uppercase"
+            style={{ fontSize: f.labelFontSize ?? 9 }}
+          >
+            {f.label}
           </text>
-        )}
+        </g>
+        {f.subLabel && (() => {
+          const titleFs = f.labelFontSize ?? 9
+          const subFs = f.subLabelFontSize ?? 7
+          const subY = cy + Math.max(11, titleFs * 1.2)
+          return (
+            <g transform={undoComponentScaleAt(cx, subY, lsx, lsy)} className="pointer-events-none">
+              <text
+                x={cx}
+                y={subY}
+                textAnchor="middle"
+                className="pointer-events-none fill-slate-500 font-semibold"
+                style={{ fontSize: subFs }}
+              >
+                {f.subLabel}
+              </text>
+            </g>
+          )
+        })()}
         {selLbl && (
           <rect
             x={bbLbl.x}
@@ -729,10 +838,9 @@ export function MapCanvas() {
     const plots = plotsByBlock.get(b.id) ?? []
     const marker = markerForBlock(b.id)
     const t = mergeTransform(ct, key)
+    const { sx, sy } = resolvedComponentScale(t)
     const pivot = polygonCentroid(b.polygon)
     const tf = componentGroupTransform(pivot.x, pivot.y, t)
-    const sx = Math.max(0.04, Number.isFinite(t.scaleX) ? t.scaleX : t.uniformScale ?? 1)
-    const sy = Math.max(0.04, Number.isFinite(t.scaleY) ? t.scaleY : t.uniformScale ?? 1)
     const sel = selectedKeys.includes(key)
     const bb = blockTableBounds(b, plots, marker)
     return (
@@ -766,12 +874,8 @@ export function MapCanvas() {
           const lay = blockMarkerLayout(b, marker)
           const vs = Math.max(0.04, viewportScale)
           const depth = lay.stripDepth
-          /** Match PlotPolygon unit label baseline (9/vs), then bump for “special” header. */
-          const unitFs = 9 / vs
-          const fsFromMarker = lay.fs / vs
-          const fsFloor = unitFs * 1.22
-          const fsCap = depth * 0.58
-          const fs = Math.max(7, Math.min(fsCap, Math.max(fsFloor, fsFromMarker * 0.95)))
+          const userMapFs = marker.fontSize ?? 13
+          const fs = Math.max(5, userMapFs / vs)
           const tx =
             lay.mode === 'quad' ? lay.cx + lay.nx * (depth * 0.12) : lay.cx
           const ty =
@@ -799,21 +903,23 @@ export function MapCanvas() {
                   strokeWidth={1}
                 />
               )}
-              <g transform={counterRot}>
-                <text
-                  x={tx}
-                  y={ty}
-                  textAnchor="middle"
-                  dominantBaseline="central"
-                  className="pointer-events-none select-none fill-slate-900 font-black [text-rendering:geometricPrecision]"
-                  style={{
-                    fontSize: fs,
-                    fontWeight: marker.fontWeight ?? '800',
-                    letterSpacing: '0.04em',
-                  }}
-                >
-                  {lay.label}
-                </text>
+              <g transform={undoComponentScaleAt(tx, ty, sx, sy)}>
+                <g transform={counterRot}>
+                  <text
+                    x={tx}
+                    y={ty}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    className="pointer-events-none select-none fill-slate-900 font-black [text-rendering:geometricPrecision]"
+                    style={{
+                      fontSize: fs,
+                      fontWeight: marker.fontWeight ?? '800',
+                      letterSpacing: '0.04em',
+                    }}
+                  >
+                    {lay.label}
+                  </text>
+                </g>
               </g>
             </g>
           )
@@ -855,6 +961,7 @@ export function MapCanvas() {
     const px = l.position.x
     const py = l.position.y
     const t = mergeTransform(ct, key)
+    const { sx, sy } = resolvedComponentScale(t)
     const tf = componentGroupTransform(px, py, t)
     const bb = standaloneLabelBounds(l)
     return (
@@ -873,7 +980,9 @@ export function MapCanvas() {
           fill="transparent"
           className="map-infra-hit"
         />
-        <Label label={l} className="pointer-events-none select-none fill-slate-900" />
+        <g transform={undoComponentScaleAt(px, py, sx, sy)} className="pointer-events-none">
+          <Label label={l} className="pointer-events-none select-none fill-slate-900" />
+        </g>
         {selected && (
           <rect
             x={bb.x}
@@ -905,6 +1014,176 @@ export function MapCanvas() {
     }
     return keys
   }, [layers.labels, map.blocks, map.facilities, map.roads, otherLabels])
+
+  const collectKeysInMarquee = useCallback(
+    (dragNorm: ReturnType<typeof normalizeDragRect>) => {
+      const hit: string[] = []
+      const addIf = (key: string, world: { minX: number; minY: number; maxX: number; maxY: number } | null) => {
+        if (!world) return
+        if (world.maxX - world.minX < 1e-6 || world.maxY - world.minY < 1e-6) return
+        if (rectsOverlapAabb(dragNorm, world)) hit.push(key)
+      }
+
+      for (const r of map.roads) {
+        if (!layers.roads) continue
+        const key = roadKey(r.id)
+        const bb = polygonBounds(r.points)
+        if (r.points.length < 2) continue
+        const pivot = roadPivot(r)
+        const t = mergeTransform(ct, key)
+        addIf(key, worldAabbAfterGroupTransform(bb.minX, bb.minY, bb.maxX, bb.maxY, pivot, t))
+      }
+
+      for (const b of map.blocks) {
+        if (!layers.blocks) continue
+        const key = blockKey(b.id)
+        const plots = plotsByBlock.get(b.id) ?? []
+        const marker = markerForBlock(b.id)
+        const table = blockTableBounds(b, plots, marker)
+        if (table.width <= 0 || table.height <= 0) continue
+        const pivot = polygonCentroid(b.polygon)
+        const t = mergeTransform(ct, key)
+        addIf(
+          key,
+          worldAabbAfterGroupTransform(
+            table.x,
+            table.y,
+            table.x + table.width,
+            table.y + table.height,
+            pivot,
+            t,
+          ),
+        )
+      }
+
+      for (const f of map.facilities) {
+        if (!layers.facilities) continue
+        const pivot = polygonCentroid(f.polygon)
+        const bb = polygonBounds(f.polygon)
+
+        const kPoly = facilityKey(f.id)
+        const tPoly = mergeTransform(ct, kPoly)
+        addIf(kPoly, worldAabbAfterGroupTransform(bb.minX, bb.minY, bb.maxX, bb.maxY, pivot, tPoly))
+
+        const kLbl = facilityLabelKey(f.id)
+        const cx = pivot.x
+        const cy = pivot.y
+        const bbLbl = facilityLabelBounds(f, cx, cy)
+        const tLbl = mergeTransform(ct, kLbl)
+        addIf(
+          kLbl,
+          worldAabbAfterGroupTransform(
+            bbLbl.x,
+            bbLbl.y,
+            bbLbl.x + bbLbl.width,
+            bbLbl.y + bbLbl.height,
+            pivot,
+            tLbl,
+          ),
+        )
+      }
+
+      if (layers.labels) {
+        for (const l of otherLabels) {
+          const key = `label:${l.id}`
+          const bb = standaloneLabelBounds(l)
+          const t = mergeTransform(ct, key)
+          const px = l.position.x
+          const py = l.position.y
+          addIf(
+            key,
+            worldAabbAfterGroupTransform(bb.x, bb.y, bb.x + bb.width, bb.y + bb.height, { x: px, y: py }, t),
+          )
+        }
+      }
+
+      return hit
+    },
+    [
+      ct,
+      layers.blocks,
+      layers.facilities,
+      layers.labels,
+      layers.roads,
+      map.blocks,
+      map.facilities,
+      map.roads,
+      markerForBlock,
+      otherLabels,
+      plotsByBlock,
+    ],
+  )
+
+  const onSvgBackgroundPointerDown = useCallback(
+    (e: React.PointerEvent<SVGSVGElement>) => {
+      const el = e.target as Element
+      if (el.closest('.map-infra-select')) return
+
+      const mod = e.ctrlKey || e.metaKey
+      if (!mod) {
+        clearComponentSelection()
+        selectPlot(null)
+        return
+      }
+
+      e.preventDefault()
+      e.stopPropagation()
+      if (!svgRef.current) return
+      const p0 = screenToSvgPoint(svgRef.current, e.clientX, e.clientY)
+      marqueeSessionRef.current = {
+        pointerId: e.pointerId,
+        x1: p0.x,
+        y1: p0.y,
+        x2: p0.x,
+        y2: p0.y,
+      }
+      setMarqueeBox(null)
+
+      const onMove = (ev: PointerEvent) => {
+        const s = marqueeSessionRef.current
+        if (!s || ev.pointerId !== s.pointerId || !svgRef.current) return
+        const p = screenToSvgPoint(svgRef.current, ev.clientX, ev.clientY)
+        s.x2 = p.x
+        s.y2 = p.y
+        const n = normalizeDragRect(s.x1, s.y1, s.x2, s.y2)
+        setMarqueeBox({
+          x: n.minX,
+          y: n.minY,
+          width: Math.max(0, n.maxX - n.minX),
+          height: Math.max(0, n.maxY - n.minY),
+        })
+      }
+
+      const onEnd = (ev: PointerEvent) => {
+        const s = marqueeSessionRef.current
+        if (!s || ev.pointerId !== s.pointerId) return
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onEnd)
+        window.removeEventListener('pointercancel', onEnd)
+
+        marqueeSessionRef.current = null
+        const n = normalizeDragRect(s.x1, s.y1, s.x2, s.y2)
+        const dragW = n.maxX - n.minX
+        const dragH = n.maxY - n.minY
+        setMarqueeBox(null)
+
+        if (dragW < 4 || dragH < 4) {
+          clearComponentSelection()
+          selectPlot(null)
+          return
+        }
+
+        const keys = [...new Set(collectKeysInMarquee(n))]
+        selectComponentsOnly(keys)
+        selectPlot(null)
+      }
+
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onEnd)
+      window.addEventListener('pointercancel', onEnd)
+    },
+    [clearComponentSelection, collectKeysInMarquee, selectComponentsOnly, selectPlot],
+  )
 
   const layeredComponentKeys = useMemo(() => {
     const base = allComponentKeys
@@ -985,6 +1264,47 @@ export function MapCanvas() {
     return null
   }, [map.facilities, map.labels, primarySelectedKey])
 
+  const selectionFontSize = useMemo(() => {
+    if (selectedPlotId) {
+      const p = map.plots.find((q) => q.id === selectedPlotId)
+      if (!p) return null
+      return p.labelFontSize ?? 9
+    }
+    if (!primarySelectedKey) return null
+    if (primarySelectedKey.startsWith('road:')) {
+      const l = map.labels.find((x) => x.id === `lbl-${primarySelectedKey.slice(5)}`)
+      return l?.fontSize ?? 9
+    }
+    if (primarySelectedKey.startsWith('block:')) {
+      const l = map.labels.find((x) => x.id === `blk-marker-${primarySelectedKey.slice(6)}`)
+      return l?.fontSize ?? 13
+    }
+    if (primarySelectedKey.startsWith('label:')) {
+      const l = map.labels.find((x) => x.id === primarySelectedKey.slice(6))
+      return l?.fontSize ?? 10
+    }
+    if (primarySelectedKey.startsWith('facility-label:') || primarySelectedKey.startsWith('facility:')) {
+      const fid = primarySelectedKey.startsWith('facility-label:')
+        ? primarySelectedKey.slice(15)
+        : primarySelectedKey.slice(9)
+      const f = map.facilities.find((x) => x.id === fid)
+      return f?.labelFontSize ?? 9
+    }
+    return null
+  }, [map.facilities, map.labels, map.plots, primarySelectedKey, selectedPlotId])
+
+  const selectionSubLabelFontSize = useMemo(() => {
+    if (selectedPlotId) return null
+    if (!primarySelectedKey) return null
+    if (!primarySelectedKey.startsWith('facility-label:') && !primarySelectedKey.startsWith('facility:')) return null
+    const fid = primarySelectedKey.startsWith('facility-label:')
+      ? primarySelectedKey.slice(15)
+      : primarySelectedKey.slice(9)
+    const f = map.facilities.find((x) => x.id === fid)
+    if (!f) return null
+    return f.subLabelFontSize ?? 7
+  }, [map.facilities, primarySelectedKey, selectedPlotId])
+
   const selectedBlockIdForToolbar = primarySelectedKey?.startsWith('block:')
     ? primarySelectedKey.replace('block:', '')
     : null
@@ -1004,6 +1324,35 @@ export function MapCanvas() {
       patchBlock(selectedBlockIdForToolbar, { labelStripDepthRatio: ratio })
     },
     [patchBlock, selectedBlockIdForToolbar],
+  )
+
+  const handleSetSelectionFontSize = useCallback(
+    (raw: number) => {
+      const n = Math.min(64, Math.max(4, Math.round(raw)))
+      if (selectedPlotId) {
+        updatePlot(selectedPlotId, { labelFontSize: n })
+        return
+      }
+      for (const key of selectedKeys) {
+        if (key.startsWith('road:')) patchMapLabel(`lbl-${key.slice(5)}`, { fontSize: n })
+        else if (key.startsWith('block:')) patchMapLabel(`blk-marker-${key.slice(6)}`, { fontSize: n })
+        else if (key.startsWith('label:')) patchMapLabel(key.slice(6), { fontSize: n })
+        else if (key.startsWith('facility-label:')) patchFacility(key.slice(15), { labelFontSize: n })
+        else if (key.startsWith('facility:')) patchFacility(key.slice(9), { labelFontSize: n })
+      }
+    },
+    [patchFacility, patchMapLabel, selectedKeys, selectedPlotId, updatePlot],
+  )
+
+  const handleSetSubLabelFontSize = useCallback(
+    (raw: number) => {
+      const n = Math.min(48, Math.max(4, Math.round(raw)))
+      for (const key of selectedKeys) {
+        if (key.startsWith('facility-label:')) patchFacility(key.slice(15), { subLabelFontSize: n })
+        else if (key.startsWith('facility:')) patchFacility(key.slice(9), { subLabelFontSize: n })
+      }
+    },
+    [patchFacility, selectedKeys],
   )
 
   const makeId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
@@ -1049,15 +1398,19 @@ export function MapCanvas() {
         { x: b.minX + col * cellW, y: b.minY + (row + 1) * cellH },
       ]
     }
+    const cat = categoryForNewPlotInBlock(map, block, blockId)
+    const meta: Record<string, unknown> = { row, col }
+    if (cat) meta.category = cat
+
     addPlot({
       id,
       number,
       status: 'available',
       blockId,
       polygon,
-      meta: { row, col },
+      meta,
     })
-  }, [addPlot, map.blocks, map.plots, selectedKeys])
+  }, [addPlot, map, map.blocks, map.plots, selectedKeys])
 
   const growBlockGrid = useCallback(
     (blockId: string, addRows: number, addCols: number) => {
@@ -1271,13 +1624,13 @@ export function MapCanvas() {
           autoAlignment={{ disabled: true, sizeX: 0, sizeY: 0 }}
           panning={{
             velocityDisabled: true,
-            excluded: ['map-infra-hit', 'map-infra-select'],
+            excluded: [...mapPanZoomExcluded],
           }}
           wheel={{
             step: 0.09,
-            excluded: ['map-infra-hit', 'map-infra-select'],
+            excluded: [...mapPanZoomExcluded],
           }}
-          pinch={{ step: 1 }}
+          pinch={{ step: 1, excluded: [...mapPanZoomExcluded] }}
           doubleClick={{ disabled: true }}
           onTransformed={(_, state) => {
             setViewport({
@@ -1310,7 +1663,14 @@ export function MapCanvas() {
                 className="map-zoom-svg block cursor-grab touch-none select-none bg-[#f4f9f2] active:cursor-grabbing"
                 onPointerDown={onSvgBackgroundPointerDown}
               >
-                <rect x={0} y={0} width={sheet.width} height={sheet.height} fill="#f4f9f2" />
+                <rect
+                  x={0}
+                  y={0}
+                  width={sheet.width}
+                  height={sheet.height}
+                  fill="#f4f9f2"
+                  className={mapTransformBlockInfra ? 'map-infra-marquee-root' : undefined}
+                />
 
                 {layeredComponentKeys.map((k) => {
                   if (k.startsWith('road:') && !layers.roads) return null
@@ -1320,6 +1680,19 @@ export function MapCanvas() {
                   if (k.startsWith('block:')) return componentNodeByKey.get(k) ?? null
                   return componentNodeByKey.get(k) ?? null
                 })}
+                {marqueeBox && (marqueeBox.width > 0 || marqueeBox.height > 0) ? (
+                  <rect
+                    x={marqueeBox.x}
+                    y={marqueeBox.y}
+                    width={marqueeBox.width}
+                    height={marqueeBox.height}
+                    fill="rgba(37,99,235,0.14)"
+                    stroke="#2563eb"
+                    strokeWidth={2}
+                    className="pointer-events-none"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                ) : null}
               </svg>
             </div>
           </TransformComponent>
@@ -1364,6 +1737,10 @@ export function MapCanvas() {
         onFitView={fitView}
         selectedBlockLabelStripPercent={selectedBlockLabelStripPercent}
         onSetBlockLabelStripPercent={handleSetBlockLabelStripPercent}
+        selectionFontSize={selectionFontSize}
+        onSetSelectionFontSize={handleSetSelectionFontSize}
+        selectionSubLabelFontSize={selectionSubLabelFontSize}
+        onSetSubLabelFontSize={handleSetSubLabelFontSize}
       />
       <input
         ref={importInputRef}

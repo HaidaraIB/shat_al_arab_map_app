@@ -16,6 +16,8 @@ export type Plot = {
   status: PlotStatus
   polygon: Point[]
   blockId: string
+  /** Optional map-units font size for the unit number label (default 9). */
+  labelFontSize?: number
   /** Extensible metadata (pricing, ownership, reservation ids, etc.) */
   meta?: Record<string, unknown>
 }
@@ -31,6 +33,8 @@ export type Road = {
 export type Block = {
   id: string
   label: string
+  /** Optional explicit class (A/B/C). If unset, UI derives from block title / marker label. */
+  classification?: string
   polygon: Point[]
   rows?: number
   cols?: number
@@ -50,6 +54,10 @@ export type Facility = {
   label: string
   polygon: Point[]
   subLabel?: string
+  /** Map-units px for the main title (default 9). */
+  labelFontSize?: number
+  /** Map-units px for `subLabel` (default 7). */
+  subLabelFontSize?: number
   kind?: FacilityKind
 }
 

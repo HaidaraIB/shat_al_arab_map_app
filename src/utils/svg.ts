@@ -22,6 +22,24 @@ export function screenToSvgPoint(svg: SVGSVGElement, clientX: number, clientY: n
   return { x: p.x, y: p.y }
 }
 
+/** Effective scale factors used by `componentGroupTransform` (clamped for safe inverses). */
+export function resolvedComponentScale(t: ComponentTransform): { sx: number; sy: number } {
+  return {
+    sx: Math.max(0.04, Number.isFinite(t.scaleX) ? t.scaleX : t.uniformScale ?? 1),
+    sy: Math.max(0.04, Number.isFinite(t.scaleY) ? t.scaleY : t.uniformScale ?? 1),
+  }
+}
+
+/**
+ * SVG group transform that undoes non-uniform scale from the parent `componentGroupTransform`,
+ * keeping text glyph aspect ratio; anchor at `(px, py)` should match the label position.
+ */
+export function undoComponentScaleAt(px: number, py: number, sx: number, sy: number): string {
+  const ix = 1 / Math.max(0.04, sx)
+  const iy = 1 / Math.max(0.04, sy)
+  return `translate(${px}, ${py}) scale(${ix}, ${iy}) translate(${-px}, ${-py})`
+}
+
 /** Local pivot rotate + non-uniform scale + translate (after translate x,y). */
 export function componentGroupTransform(cx: number, cy: number, t: ComponentTransform): string {
   const sx = Number.isFinite(t.scaleX) ? t.scaleX : t.uniformScale

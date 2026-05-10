@@ -208,6 +208,8 @@ type MapState = {
   canUndo: boolean
   canRedo: boolean
   selectedPlotId: string | null
+  /** When true, App may open the unit details modal for the current `selectedPlotId` (consumed in App). */
+  plotSelectionOpensUnitModal: boolean
   hoveredPlotId: string | null
   editMode: boolean
   editorTool: EditorTool
@@ -236,7 +238,7 @@ type MapState = {
   setEditMode: (on: boolean) => void
   setEditorTool: (t: EditorTool) => void
 
-  selectPlot: (id: string | null) => void
+  selectPlot: (id: string | null, options?: { openUnitModal?: boolean }) => void
   setHoveredPlot: (id: string | null) => void
 
   importMap: (data: MapData) => void
@@ -263,8 +265,10 @@ type MapState = {
   deleteFacility: (id: string) => void
   addMapLabel: (label: MapLabel) => void
   addLabel: (label: MapLabel) => void
+  patchMapLabel: (id: string, patch: Partial<MapLabel>) => void
   updateLabelText: (id: string, text: string) => void
   updateFacilityText: (id: string, text: string) => void
+  patchFacility: (id: string, patch: Partial<Facility>) => void
   deleteMapLabel: (id: string) => void
   deleteSelectedComponents: () => void
 
@@ -290,6 +294,7 @@ export const useMapStore = create<MapState>((set, get) => ({
   canUndo: false,
   canRedo: false,
   selectedPlotId: null,
+  plotSelectionOpensUnitModal: false,
   hoveredPlotId: null,
   editMode: false,
   editorTool: 'select',
@@ -379,13 +384,19 @@ export const useMapStore = create<MapState>((set, get) => ({
 
   setEditorTool: (editorTool) => set(() => ({ editorTool, drawing: { mode: 'idle' } })),
 
-  selectPlot: (selectedPlotId) => set(() => ({ selectedPlotId })),
+  selectPlot: (selectedPlotId, options) =>
+    set(() => ({
+      selectedPlotId,
+      plotSelectionOpensUnitModal:
+        selectedPlotId !== null && (options?.openUnitModal ?? true),
+    })),
   setHoveredPlot: (hoveredPlotId) => set(() => ({ hoveredPlotId })),
 
   importMap: (data) =>
     set(() => ({
       map: withInitializedZIndex(cloneMap(data)),
       selectedPlotId: null,
+      plotSelectionOpensUnitModal: false,
       hoveredPlotId: null,
       drawing: { mode: 'idle' },
       selectedComponentKeys: [],
@@ -397,6 +408,7 @@ export const useMapStore = create<MapState>((set, get) => ({
     set(() => ({
       map: resolveDefaultMap(),
       selectedPlotId: null,
+      plotSelectionOpensUnitModal: false,
       hoveredPlotId: null,
       drawing: { mode: 'idle' },
       selectedComponentKeys: [],
@@ -412,6 +424,7 @@ export const useMapStore = create<MapState>((set, get) => ({
     set(() => ({
       map: resolveDefaultMap(),
       selectedPlotId: null,
+      plotSelectionOpensUnitModal: false,
       hoveredPlotId: null,
       drawing: { mode: 'idle' },
       selectedComponentKeys: [],
@@ -455,6 +468,8 @@ export const useMapStore = create<MapState>((set, get) => ({
         plots: s.map.plots.filter((p) => p.id !== id),
       },
       selectedPlotId: s.selectedPlotId === id ? null : s.selectedPlotId,
+      plotSelectionOpensUnitModal:
+        s.selectedPlotId === id ? false : s.plotSelectionOpensUnitModal,
     })),
 
   updateVertex: (plotId, vertexIndex, point) =>
@@ -601,11 +616,27 @@ export const useMapStore = create<MapState>((set, get) => ({
       },
     })),
 
+  patchMapLabel: (id, patch) =>
+    set((s) => ({
+      map: {
+        ...s.map,
+        labels: s.map.labels.map((l) => (l.id === id ? { ...l, ...patch } : l)),
+      },
+    })),
+
   updateFacilityText: (id, text) =>
     set((s) => ({
       map: {
         ...s.map,
         facilities: s.map.facilities.map((f) => (f.id === id ? { ...f, label: text } : f)),
+      },
+    })),
+
+  patchFacility: (id, patch) =>
+    set((s) => ({
+      map: {
+        ...s.map,
+        facilities: s.map.facilities.map((f) => (f.id === id ? { ...f, ...patch } : f)),
       },
     })),
 
@@ -701,6 +732,7 @@ export const useMapStore = create<MapState>((set, get) => ({
       map: { ...map, plots: [...map.plots, plot] },
       drawing: { mode: 'idle' },
       selectedPlotId: id,
+      plotSelectionOpensUnitModal: false,
     }))
   },
 
@@ -739,6 +771,7 @@ useMapStore.setState({
       canRedo: redoStack.length > 0,
       selectedComponentKeys: [],
       selectedPlotId: null,
+      plotSelectionOpensUnitModal: false,
       hoveredPlotId: null,
       drawing: { mode: 'idle' },
     })
@@ -758,6 +791,7 @@ useMapStore.setState({
       canRedo: redoStack.length > 0,
       selectedComponentKeys: [],
       selectedPlotId: null,
+      plotSelectionOpensUnitModal: false,
       hoveredPlotId: null,
       drawing: { mode: 'idle' },
     })
@@ -805,6 +839,7 @@ export async function bootstrapPublicMap(): Promise<void> {
     canUndo: false,
     canRedo: false,
     selectedPlotId: null,
+    plotSelectionOpensUnitModal: false,
     hoveredPlotId: null,
     selectedComponentKeys: [],
     drawing: { mode: 'idle' },
