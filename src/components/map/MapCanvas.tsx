@@ -900,7 +900,11 @@ export function MapCanvas() {
           <polygon
             points={pointsToSvgPoints(b.polygon)}
             fill="none"
-            stroke={b.strokeColor ?? '#ea580c'}
+            stroke={
+              !b.strokeColor || b.strokeColor.toLowerCase() === '#ea580c'
+                ? 'none'
+                : b.strokeColor
+            }
             strokeWidth={2}
             className="pointer-events-none"
           />
@@ -1512,7 +1516,6 @@ export function MapCanvas() {
         { x: c.x + w / 2, y: c.y + h / 2 },
         { x: c.x - w / 2, y: c.y + h / 2 },
       ],
-      strokeColor: '#ea580c',
       fillColor: 'transparent',
     })
     addLabel({
