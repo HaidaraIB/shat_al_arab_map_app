@@ -5,7 +5,6 @@ export type CreateEmployeeInput = {
   email: string
   password: string
   name: string
-  role: UserRole
 }
 
 export type CreateEmployeeResult =
@@ -14,13 +13,13 @@ export type CreateEmployeeResult =
 
 // Creates a new auth user via signUp on an isolated client (so the current
 // admin's session is not replaced), then updates the freshly-created profile
-// row with the requested name + role. Requires the caller to currently be
-// authenticated as an admin (RLS will reject the profile UPDATE otherwise).
+// row with the requested name and sales role. Managers are created in Supabase only.
+// Requires the caller to currently be authenticated as an admin (RLS will reject
+// the profile UPDATE otherwise).
 export async function createEmployee({
   email,
   password,
   name,
-  role,
 }: CreateEmployeeInput): Promise<CreateEmployeeResult> {
   const isolated = createIsolatedSupabase()
   const main = getSupabase()
@@ -59,11 +58,11 @@ export async function createEmployee({
     }
   }
 
-  // The handle_new_user trigger already created a profile row. Ensure name +
-  // role match what the admin selected (default trigger sets role='sales').
+  // The handle_new_user trigger already created a profile row. Ensure name and
+  // sales role (default trigger sets role='sales').
   const { error: upErr } = await main
     .from('profiles')
-    .update({ name: cleanName, role })
+    .update({ name: cleanName, role: 'sales' })
     .eq('id', userId)
 
   if (upErr) {
@@ -76,16 +75,50 @@ export async function createEmployee({
   return { ok: true, userId }
 }
 
+export type UpdateEmployeeInput = {
+  name: string
+  role: UserRole
+}
+
+export async function updateEmployee(
+  userId: string,
+  { name, role }: UpdateEmployeeInput,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const main = getSupabase()
+  if (!main) return { ok: false, error: 'Cloud backend is not configured.' }
+  const cleanName = name.trim()
+  if (!cleanName) return { ok: false, error: 'الاسم مطلوب.' }
+  const { error } = await main
+    .from('profiles')
+    .update({ name: cleanName, role })
+    .eq('id', userId)
+  if (error) return { ok: false, error: error.message }
+  return { ok: true }
+}
+
+export async function deleteEmployee(
+  userId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const main = getSupabase()
+  if (!main) return { ok: false, error: 'Cloud backend is not configured.' }
+  const { error } = await main.rpc('delete_employee', { target_id: userId })
+  if (error) return { ok: false, error: error.message }
+  return { ok: true }
+}
+
+/** @deprecated Use updateEmployee instead */
 export async function updateEmployeeRole(
   userId: string,
   role: UserRole,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const main = getSupabase()
   if (!main) return { ok: false, error: 'Cloud backend is not configured.' }
-  const { error } = await main
+  const { data, error: fetchErr } = await main
     .from('profiles')
-    .update({ role })
+    .select('name')
     .eq('id', userId)
-  if (error) return { ok: false, error: error.message }
-  return { ok: true }
+    .maybeSingle()
+  if (fetchErr) return { ok: false, error: fetchErr.message }
+  const currentName = data?.name?.trim() || ''
+  return updateEmployee(userId, { name: currentName, role })
 }

@@ -3,7 +3,7 @@ import type { Database } from '../lib/database.types'
 
 export type PlotStateRow = Database['public']['Tables']['plot_state']['Row']
 
-const BOOKING_META_KEYS = ['customerName', 'note', 'reservedAt', 'reservedUntil', 'price'] as const
+const BOOKING_META_KEYS = ['customerName', 'note', 'reservedAt', 'reservedUntil', 'price', 'employeePrice'] as const
 
 function stripBookingMeta(meta: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!meta) return {}
@@ -36,6 +36,8 @@ export function mergePlotStateIntoMap(map: MapData, rows: PlotStateRow[]): MapDa
       const meta = { ...(p.meta ?? {}) } as Record<string, unknown>
       if (row.price != null) meta.price = row.price
       else delete meta.price
+      if (row.employee_price != null) meta.employeePrice = row.employee_price
+      else delete meta.employeePrice
       if (row.customer_name) meta.customerName = row.customer_name
       else delete meta.customerName
       if (row.note) meta.note = row.note
@@ -57,10 +59,17 @@ export function plotStateRowsFromMap(map: MapData): Omit<PlotStateRow, 'updated_
   return map.plots.map((p) => {
     const meta = (p.meta ?? {}) as Record<string, unknown>
     const price = typeof meta.price === 'number' ? meta.price : meta.price != null ? Number(meta.price) : null
+    const employeePrice =
+      typeof meta.employeePrice === 'number'
+        ? meta.employeePrice
+        : meta.employeePrice != null
+          ? Number(meta.employeePrice)
+          : null
     return {
       plot_id: p.id,
       status: p.status,
       price: Number.isFinite(price as number) ? (price as number) : null,
+      employee_price: Number.isFinite(employeePrice as number) ? (employeePrice as number) : null,
       customer_name: typeof meta.customerName === 'string' ? meta.customerName : null,
       note: typeof meta.note === 'string' ? meta.note : null,
       reserved_at: typeof meta.reservedAt === 'string' ? meta.reservedAt : null,
@@ -72,10 +81,17 @@ export function plotStateRowsFromMap(map: MapData): Omit<PlotStateRow, 'updated_
 export function plotToRemotePatch(plot: Plot): Omit<PlotStateRow, 'updated_at' | 'updated_by'> {
   const meta = (plot.meta ?? {}) as Record<string, unknown>
   const price = typeof meta.price === 'number' ? meta.price : meta.price != null ? Number(meta.price) : null
+  const employeePrice =
+    typeof meta.employeePrice === 'number'
+      ? meta.employeePrice
+      : meta.employeePrice != null
+        ? Number(meta.employeePrice)
+        : null
   return {
     plot_id: plot.id,
     status: plot.status,
     price: Number.isFinite(price as number) ? (price as number) : null,
+    employee_price: Number.isFinite(employeePrice as number) ? (employeePrice as number) : null,
     customer_name: typeof meta.customerName === 'string' ? meta.customerName : null,
     note: typeof meta.note === 'string' ? meta.note : null,
     reserved_at: typeof meta.reservedAt === 'string' ? meta.reservedAt : null,

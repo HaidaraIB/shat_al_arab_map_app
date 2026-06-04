@@ -27,6 +27,8 @@ export interface Unit {
   number: string;
   status: UnitStatus;
   price?: number;
+  /** Price shown to sales employees (may differ from internal `price`). */
+  employeePrice?: number;
   area?: number;
   unitType?: 'ركن' | 'عادي';
   category?: 'A' | 'B' | 'C';

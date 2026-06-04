@@ -561,9 +561,15 @@ export function MapCanvas() {
     [clickToggleComponent, moveComponentsBy],
   )
 
+  const plotInteractiveForUser = useCallback(
+    (plot: Plot) => isAdmin || plot.status === 'available',
+    [isAdmin],
+  )
+
   const handlePlotClick = useCallback(
     (plot: Plot, e: React.MouseEvent<SVGGElement>) => {
       e.stopPropagation()
+      if (!plotInteractiveForUser(plot)) return
       // Second click of a double-click is ignored here; double-click selects the parent block instead.
       if (e.detail >= 2) return
       if (e.ctrlKey || e.metaKey) {
@@ -573,19 +579,20 @@ export function MapCanvas() {
       }
       selectPlot(plot.id)
     },
-    [clearComponentSelection, selectPlot],
+    [clearComponentSelection, plotInteractiveForUser, selectPlot],
   )
 
   const handlePlotDoubleClick = useCallback(
     (plot: Plot, e: React.MouseEvent<SVGGElement>) => {
       e.preventDefault()
       e.stopPropagation()
+      if (!plotInteractiveForUser(plot)) return
       selectPlot(null)
       if (map.blocks.some((bl) => bl.id === plot.blockId)) {
         selectComponentsOnly([blockKey(plot.blockId)])
       }
     },
-    [map.blocks, selectComponentsOnly, selectPlot],
+    [map.blocks, plotInteractiveForUser, selectComponentsOnly, selectPlot],
   )
 
   const fitView = useCallback(() => {
@@ -968,6 +975,7 @@ export function MapCanvas() {
             <PlotPolygon
               key={plot.id}
               plot={plot}
+              interactive={plotInteractiveForUser(plot)}
               hovered={hoveredPlotId === plot.id}
               selected={selectedPlotId === plot.id}
               inverseScaleX={sx}

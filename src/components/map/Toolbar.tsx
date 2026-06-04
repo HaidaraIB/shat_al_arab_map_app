@@ -188,8 +188,12 @@ export function Toolbar({
           <ul className="text-[10px] text-slate-600 leading-snug min-w-0 list-disc space-y-1 ps-3 marker:text-slate-400">
             <li>سحب للتحريك</li>
             <li>عجلة للتكبير</li>
-            <li>Ctrl/Cmd+نقر تحديد سريع</li>
-            <li>Ctrl/Cmd+سحب على الخلفية تحديد مستطيل</li>
+            {isAdmin && (
+              <>
+                <li>Ctrl/Cmd+نقر تحديد سريع</li>
+                <li>Ctrl/Cmd+سحب على الخلفية تحديد مستطيل</li>
+              </>
+            )}
           </ul>
           <button
             type="button"
@@ -227,62 +231,65 @@ export function Toolbar({
               ملاءمة العرض
             </button>
           </div>
-          <div className="flex flex-wrap gap-1">
-            <button
-              type="button"
-              onClick={onUndo}
-              disabled={!canUndo}
-              className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
-            >
-              تراجع
-            </button>
-            <button
-              type="button"
-              onClick={onRedo}
-              disabled={!canRedo}
-              className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
-            >
-              إعادة
-            </button>
-          </div>
-          <div className="flex flex-wrap gap-1">
-            <button
-              type="button"
-              onClick={onExportDisk}
-              className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-100"
-            >
-              تصدير ملف
-            </button>
-            {isAdmin && (
-              <button
-                type="button"
-                onClick={onImportDisk}
-                className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
-              >
-                استيراد ملف
-              </button>
-            )}
-            {isAdmin && !previewMode && (
-              <>
+          {isAdmin && (
+            <>
+              <div className="flex flex-wrap gap-1">
                 <button
                   type="button"
-                  onClick={onPublishDesign}
-                  className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-900 hover:bg-amber-100"
+                  onClick={onUndo}
+                  disabled={!canUndo}
+                  className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
                 >
-                  نشر التصميم
+                  تراجع
                 </button>
                 <button
                   type="button"
-                  onClick={onReseedPlotState}
-                  className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-900 hover:bg-rose-100"
+                  onClick={onRedo}
+                  disabled={!canRedo}
+                  className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
                 >
-                  إعادة حالات
+                  إعادة
                 </button>
-              </>
-            )}
-          </div>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                <button
+                  type="button"
+                  onClick={onExportDisk}
+                  className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-100"
+                >
+                  تصدير ملف
+                </button>
+                <button
+                  type="button"
+                  onClick={onImportDisk}
+                  className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                >
+                  استيراد ملف
+                </button>
+                {!previewMode && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={onPublishDesign}
+                      className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-900 hover:bg-amber-100"
+                    >
+                      نشر التصميم
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onReseedPlotState}
+                      className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-900 hover:bg-rose-100"
+                    >
+                      إعادة حالات
+                    </button>
+                  </>
+                )}
+              </div>
+            </>
+          )}
         </div>
 
+        {isAdmin && (
         <div className="border-t border-slate-100 pt-2 space-y-2">
           <p className="text-[10px] font-bold text-slate-500">
             العنصر المحدد
@@ -695,6 +702,7 @@ export function Toolbar({
           </label>
           </div>
         </div>
+        )}
         </div>
       </div>
       <ConfirmDialog

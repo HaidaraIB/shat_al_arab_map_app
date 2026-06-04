@@ -28,6 +28,7 @@ export const PlotPolygon = memo(
     viewportScale = 1,
     /** Same as block title: counter parent `componentGroupTransform` rotation so digits read like “B2” / “C1”. */
     blockRotationDeg = 0,
+    interactive = true,
     onPointerEnter,
     onPointerLeave,
     onClick,
@@ -36,6 +37,8 @@ export const PlotPolygon = memo(
     plot: Plot
     hovered?: boolean
     selected?: boolean
+    /** When false, plot is not clickable (e.g. sales view on non-available units). */
+    interactive?: boolean
     inverseScaleX?: number
     inverseScaleY?: number
     viewportScale?: number
@@ -62,11 +65,11 @@ export const PlotPolygon = memo(
 
     return (
       <g
-        className="cursor-pointer"
-        onPointerEnter={onPointerEnter}
-        onPointerLeave={onPointerLeave}
-        onClick={onClick}
-        onDoubleClick={onDoubleClick}
+        className={interactive ? 'cursor-pointer' : 'cursor-default pointer-events-none'}
+        onPointerEnter={interactive ? onPointerEnter : undefined}
+        onPointerLeave={interactive ? onPointerLeave : undefined}
+        onClick={interactive ? onClick : undefined}
+        onDoubleClick={interactive ? onDoubleClick : undefined}
       >
         <polygon
           points={pts}
@@ -125,6 +128,7 @@ export const PlotPolygon = memo(
     a.plot === b.plot &&
     a.hovered === b.hovered &&
     a.selected === b.selected &&
+    a.interactive === b.interactive &&
     a.inverseScaleX === b.inverseScaleX &&
     a.inverseScaleY === b.inverseScaleY &&
     a.viewportScale === b.viewportScale &&

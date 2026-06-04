@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Building2, 
@@ -21,6 +22,8 @@ import {
   Save,
   RotateCcw,
   UserPlus,
+  Pencil,
+  Trash2,
   Eye,
   EyeOff,
 } from 'lucide-react';
@@ -35,7 +38,7 @@ import { useMapStore, bootstrapPublicMap } from './store/mapStore';
 import { useAuth } from './lib/auth';
 import { getSupabase, isSupabaseConfigured } from './lib/supabase';
 import { publishDesignRemote, upsertPlotStateFromPlot, reseedPlotStateRemote } from './lib/mapRemote';
-import { createEmployee, updateEmployeeRole } from './lib/employees';
+import { createEmployee, updateEmployee, deleteEmployee } from './lib/employees';
 import type { Database } from './lib/database.types';
 import type { UserRole } from './lib/database.types';
 
@@ -44,15 +47,16 @@ type ProfileRow = Database['public']['Tables']['profiles']['Row'];
 
 interface CategoryConfig {
   basePrice: number;
+  baseEmployeePrice: number;
   baseArea: number;
   cornerPremium: number;
   cornerAreaBonus: number;
 }
 
 const DEFAULT_CONFIGS: Record<'A' | 'B' | 'C', CategoryConfig> = {
-  A: { basePrice: 250000000, baseArea: 200, cornerPremium: 15, cornerAreaBonus: 20 },
-  B: { basePrice: 220000000, baseArea: 200, cornerPremium: 15, cornerAreaBonus: 20 },
-  C: { basePrice: 180000000, baseArea: 200, cornerPremium: 15, cornerAreaBonus: 20 },
+  A: { basePrice: 250000000, baseEmployeePrice: 250000000, baseArea: 200, cornerPremium: 15, cornerAreaBonus: 20 },
+  B: { basePrice: 220000000, baseEmployeePrice: 220000000, baseArea: 200, cornerPremium: 15, cornerAreaBonus: 20 },
+  C: { basePrice: 180000000, baseEmployeePrice: 180000000, baseArea: 200, cornerPremium: 15, cornerAreaBonus: 20 },
 };
 
 const CATEGORY_CONFIGS_STORAGE_KEY = 'shat_al_arab_category_configs_v1'
@@ -88,8 +92,10 @@ function deriveCategoryConfigsFromMap(map: MapData): Record<'A' | 'B' | 'C', Cat
     const nm = normal?.meta as Record<string, unknown> | undefined
     if (nm) {
       const bp = parseMetaNum(nm.price)
+      const bep = parseMetaNum(nm.employeePrice)
       const ba = parseMetaNum(nm.area)
       if (bp != null) out[cat].basePrice = bp
+      if (bep != null) out[cat].baseEmployeePrice = bep
       if (ba != null) out[cat].baseArea = ba
     }
 
@@ -131,7 +137,16 @@ function loadCategoryConfigsFromStorage(): Record<'A' | 'B' | 'C', CategoryConfi
         return null
       }
     }
-    return cloneCategoryConfigs(p as Record<'A' | 'B' | 'C', CategoryConfig>)
+    const loaded = cloneCategoryConfigs(p as Record<'A' | 'B' | 'C', CategoryConfig>)
+    for (const cat of ['A', 'B', 'C'] as const) {
+      const o = (p as Record<string, unknown>)[cat] as Record<string, unknown>
+      if (typeof o.baseEmployeePrice === 'number') {
+        loaded[cat].baseEmployeePrice = o.baseEmployeePrice
+      } else {
+        loaded[cat].baseEmployeePrice = loaded[cat].basePrice
+      }
+    }
+    return loaded
   } catch {
     return null
   }
@@ -156,11 +171,13 @@ function applyCategoryConfigsToMap(map: MapData, newConfigs: Record<'A' | 'B' | 
       if (!cat || !newConfigs[cat]) return plot
       const cfg = newConfigs[cat]
       const isCorner = meta.unitType === 'ركن'
+      const cornerMul = 1 + cfg.cornerPremium / 100
       return {
         ...plot,
         meta: {
           ...meta,
-          price: isCorner ? cfg.basePrice * (1 + cfg.cornerPremium / 100) : cfg.basePrice,
+          price: isCorner ? cfg.basePrice * cornerMul : cfg.basePrice,
+          employeePrice: isCorner ? cfg.baseEmployeePrice * cornerMul : cfg.baseEmployeePrice,
           area: isCorner ? cfg.baseArea + cfg.cornerAreaBonus : cfg.baseArea,
         },
       }
@@ -196,18 +213,30 @@ export default function App() {
   const [bookingNote, setBookingNote] = useState('');
   const [isEditingPrice, setIsEditingPrice] = useState(false);
   const [tempPrice, setTempPrice] = useState<number | string>('');
+  const [isEditingEmployeePrice, setIsEditingEmployeePrice] = useState(false);
+  const [tempEmployeePrice, setTempEmployeePrice] = useState<number | string>('');
   const [editingUnitIdInTable, setEditingUnitIdInTable] = useState<string | null>(null);
   const [tempPriceInTable, setTempPriceInTable] = useState<number | string>('');
+  const [editingEmployeePriceUnitId, setEditingEmployeePriceUnitId] = useState<string | null>(null);
+  const [tempEmployeePriceInTable, setTempEmployeePriceInTable] = useState<number | string>('');
   const [signOutConfirmOpen, setSignOutConfirmOpen] = useState(false);
   const [resetDefaultsConfirmOpen, setResetDefaultsConfirmOpen] = useState(false);
-  const [roleChangeRequest, setRoleChangeRequest] = useState<null | {
+  const [editingEmployee, setEditingEmployee] = useState<ProfileRow | null>(null)
+  const [pendingEmployeeUpdate, setPendingEmployeeUpdate] = useState<null | {
     userId: string
     userName: string
+    name: string
+    role: UserRole
     nextRole: UserRole
+  }>(null)
+  const [deleteEmployeeRequest, setDeleteEmployeeRequest] = useState<null | {
+    userId: string
+    userName: string
   }>(null)
   const [signOutActionLoading, setSignOutActionLoading] = useState(false)
   const [resetDefaultsLoading, setResetDefaultsLoading] = useState(false)
-  const [roleChangeLoading, setRoleChangeLoading] = useState(false)
+  const [employeeSaveLoading, setEmployeeSaveLoading] = useState(false)
+  const [deleteEmployeeLoading, setDeleteEmployeeLoading] = useState(false)
   const selectedPlotIdOnMap = useMapStore((s) => s.selectedPlotId);
   const plotSelectionOpensUnitModal = useMapStore((s) => s.plotSelectionOpensUnitModal);
   const hoveredPlotIdOnMap = useMapStore((s) => s.hoveredPlotId);
@@ -313,6 +342,14 @@ export default function App() {
     if (plot) await upsertPlotStateFromPlot(plot)
   }
 
+  const updateUnitEmployeePrice = async (unitId: string, newEmployeePrice: number) => {
+    updateMapPlot(unitId, {
+      meta: { ...(mapData.plots.find((p) => p.id === unitId)?.meta ?? {}), employeePrice: newEmployeePrice },
+    })
+    const plot = useMapStore.getState().map.plots.find((p) => p.id === unitId)
+    if (plot) await upsertPlotStateFromPlot(plot)
+  }
+
   const handleBooking = async (unitId: string, status: UnitStatus, name?: string, note?: string, durationHours?: number) => {
     const reservedUntilIso =
       (status === UnitStatus.RESERVED && durationHours)
@@ -339,9 +376,12 @@ export default function App() {
   }
 
   const openUnitModal = (unit: Unit) => {
+    if (!isAdmin && unit.status !== UnitStatus.AVAILABLE) return
     setSelectedUnit(unit);
     setTempPrice(unit.price || 0);
+    setTempEmployeePrice(unit.employeePrice || 0);
     setIsEditingPrice(false);
+    setIsEditingEmployeePrice(false);
   };
 
   const unitById = useMemo(() => {
@@ -353,15 +393,18 @@ export default function App() {
   const mapFocusedUnit = useMemo(() => {
     const id = hoveredPlotIdOnMap || selectedPlotIdOnMap;
     if (!id) return null;
-    return unitById.get(id) || null;
-  }, [hoveredPlotIdOnMap, selectedPlotIdOnMap, unitById]);
+    const u = unitById.get(id) || null;
+    if (!u) return null;
+    if (!isAdmin && u.status !== UnitStatus.AVAILABLE) return null;
+    return u;
+  }, [hoveredPlotIdOnMap, selectedPlotIdOnMap, unitById, isAdmin]);
 
   useEffect(() => {
     if (!selectedPlotIdOnMap || !plotSelectionOpensUnitModal) return;
     const u = unitById.get(selectedPlotIdOnMap);
     useMapStore.setState({ plotSelectionOpensUnitModal: false });
-    if (u) openUnitModal(u);
-  }, [selectedPlotIdOnMap, plotSelectionOpensUnitModal, unitById]);
+    if (u && (isAdmin || u.status === UnitStatus.AVAILABLE)) openUnitModal(u);
+  }, [selectedPlotIdOnMap, plotSelectionOpensUnitModal, unitById, isAdmin]);
 
   const filteredData = useMemo(() => {
     return data.map(block => ({
@@ -400,6 +443,7 @@ export default function App() {
     return (['A', 'B', 'C'] as const).some(
       (cat) =>
         configs[cat].basePrice !== savedConfigs[cat].basePrice ||
+        configs[cat].baseEmployeePrice !== savedConfigs[cat].baseEmployeePrice ||
         configs[cat].baseArea !== savedConfigs[cat].baseArea ||
         configs[cat].cornerPremium !== savedConfigs[cat].cornerPremium ||
         configs[cat].cornerAreaBonus !== savedConfigs[cat].cornerAreaBonus,
@@ -465,21 +509,39 @@ export default function App() {
     }
   }
 
-  const handleConfirmRoleChange = async () => {
-    if (!roleChangeRequest) return
-    const { userId, nextRole } = roleChangeRequest
-    setRoleChangeLoading(true)
+  const handleConfirmEmployeeUpdate = async () => {
+    if (!pendingEmployeeUpdate) return
+    const { userId, name, role } = pendingEmployeeUpdate
+    setEmployeeSaveLoading(true)
     try {
-      const res = await updateEmployeeRole(userId, nextRole)
+      const res = await updateEmployee(userId, { name, role })
       if (res.ok === false) {
         toast.error(res.error)
         return
       }
       await reloadTeamProfiles()
-      setRoleChangeRequest(null)
-      toast.success('تم تحديث صلاحية المستخدم.')
+      setPendingEmployeeUpdate(null)
+      setEditingEmployee(null)
+      toast.success('تم تحديث بيانات الموظف.')
     } finally {
-      setRoleChangeLoading(false)
+      setEmployeeSaveLoading(false)
+    }
+  }
+
+  const handleConfirmDeleteEmployee = async () => {
+    if (!deleteEmployeeRequest) return
+    setDeleteEmployeeLoading(true)
+    try {
+      const res = await deleteEmployee(deleteEmployeeRequest.userId)
+      if (res.ok === false) {
+        toast.error(res.error)
+        return
+      }
+      await reloadTeamProfiles()
+      setDeleteEmployeeRequest(null)
+      toast.success('تم حذف الموظف.')
+    } finally {
+      setDeleteEmployeeLoading(false)
     }
   }
 
@@ -808,8 +870,8 @@ export default function App() {
                 </div>
               </motion.div>
             ) : view === 'profile' ? (
-              <motion.div key="profile" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }} className="h-full overflow-y-auto p-12 flex flex-col items-center">
-                <div className="w-full max-w-2xl bg-white rounded-[48px] border border-slate-200 shadow-2xl overflow-hidden flex flex-col items-center p-12 relative">
+              <motion.div key="profile" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }} className="h-full min-h-0 overflow-y-auto p-12 pb-16 flex flex-col items-center">
+                <div className="w-full max-w-2xl shrink-0 bg-white rounded-[48px] border border-slate-200 shadow-2xl flex flex-col items-center p-12 pb-14 relative">
                    <div className="absolute top-0 left-0 right-0 h-40 bg-primary/5 -z-10" />
                    <div className="w-32 h-32 rounded-[40px] bg-white border-4 border-white shadow-2xl flex items-center justify-center text-primary mb-6 group overflow-hidden">
                      <UserIcon size={64} className="group-hover:scale-110 transition-transform" />
@@ -854,7 +916,7 @@ export default function App() {
                    <button
                      type="button"
                     onClick={() => setSignOutConfirmOpen(true)}
-                     className="mt-12 text-red-500 font-black text-xs uppercase tracking-widest hover:bg-red-50 px-8 py-3 rounded-2xl transition-all"
+                     className="mt-12 w-full text-red-600 font-black text-sm bg-red-50 hover:bg-red-100 px-8 py-4 rounded-2xl transition-all"
                    >
                      تسجيل الخروج من النظام
                    </button>
@@ -866,7 +928,7 @@ export default function App() {
                   <div>
                     <h2 className="text-4xl font-black text-slate-900 tracking-tight">موظفي المبيعات</h2>
                     <p className="text-slate-400 font-bold mt-1 tracking-tight">
-                      المستخدمون المسجّلون في نظام التوثيق السحابي. أضِف مندوبًا جديدًا من النموذج أدناه.
+                      المستخدمون المسجّلون في نظام التوثيق السحابي. أضِف موظفًا جديدًا أو عدّل/احذف الحسابات الحالية من البطاقات أدناه.
                     </p>
                   </div>
                 </div>
@@ -893,29 +955,30 @@ export default function App() {
                       </div>
                       <div>
                         <h3 className="text-xl font-black text-slate-800">{user.name}</h3>
+                        {user.id === profile?.id && (
+                          <span className="text-[10px] font-bold text-slate-300 mt-1 inline-block">(أنت)</span>
+                        )}
                       </div>
                       <div className="mt-6 flex items-center gap-2">
-                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">الدور</span>
-                        <select
-                          value={user.role}
-                          disabled={user.id === profile?.id}
-                          onChange={async (e) => {
-                            const next = e.target.value as UserRole
-                            if (next === user.role) return
-                            setRoleChangeRequest({
-                              userId: user.id,
-                              userName: user.name,
-                              nextRole: next,
-                            })
-                          }}
-                          className="text-xs font-bold rounded-lg border border-slate-200 bg-white px-2 py-1 text-slate-700 outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50"
+                        <button
+                          type="button"
+                          onClick={() => setEditingEmployee(user)}
+                          className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-black text-slate-600 hover:bg-slate-50 transition-colors"
                         >
-                          <option value="sales">مندوب</option>
-                          <option value="admin">مدير</option>
-                        </select>
-                        {user.id === profile?.id && (
-                          <span className="text-[10px] font-bold text-slate-300">(أنت)</span>
-                        )}
+                          <Pencil size={14} />
+                          تعديل
+                        </button>
+                        <button
+                          type="button"
+                          disabled={user.id === profile?.id}
+                          onClick={() =>
+                            setDeleteEmployeeRequest({ userId: user.id, userName: user.name })
+                          }
+                          className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-rose-200 text-xs font-black text-rose-600 hover:bg-rose-50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                          title={user.id === profile?.id ? 'لا يمكن حذف حسابك' : 'حذف الموظف'}
+                        >
+                          <Trash2 size={14} />
+                        </button>
                       </div>
                       <div className="mt-6 pt-6 border-t border-slate-50">
                         <span className="text-[10px] font-bold text-slate-300">
@@ -931,7 +994,7 @@ export default function App() {
                 <div className="flex items-center justify-between shrink-0">
                   <div>
                     <h2 className="text-3xl font-black text-slate-900 tracking-tight">إعدادات المشروع العام</h2>
-                    <p className="text-slate-400 font-bold mt-1 tracking-tight uppercase">التحكم بالأسعار والمساحات لجميع الفئات</p>
+                    <p className="text-slate-400 font-bold mt-1 tracking-tight uppercase">التحكم بالأسعار الداخلية وسعر المندوب والمساحات لجميع الفئات</p>
                   </div>
                   <div className="flex flex-wrap items-center gap-3">
                     <button
@@ -969,7 +1032,7 @@ export default function App() {
                       </div>
                       <div className="space-y-4 pt-2">
                         <div>
-                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">السعر الأساسي (IQD)</label>
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">السعر الداخلي الأساسي (IQD)</label>
                           <input 
                             type="number" 
                             step={1000}
@@ -977,6 +1040,19 @@ export default function App() {
                             value={configs[cat].basePrice}
                             onChange={(e) => {
                               const newCfgs = { ...configs, [cat]: { ...configs[cat], basePrice: Number(e.target.value) } };
+                              setConfigs(newCfgs);
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">سعر المندوب الأساسي (IQD)</label>
+                          <input
+                            type="number"
+                            step={1000}
+                            className="w-full bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-2 font-black text-emerald-800 outline-none focus:ring-2 focus:ring-emerald-200/60"
+                            value={configs[cat].baseEmployeePrice}
+                            onChange={(e) => {
+                              const newCfgs = { ...configs, [cat]: { ...configs[cat], baseEmployeePrice: Number(e.target.value) } };
                               setConfigs(newCfgs);
                             }}
                           />
@@ -1029,7 +1105,8 @@ export default function App() {
                           <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">النوع</th>
                           <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">المساحة</th>
                           <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">العميل</th>
-                          <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-left">السعر المحدث</th>
+                          <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-left">السعر الداخلي</th>
+                          <th className="p-6 text-[10px] font-black text-slate-400 uppercase tracking-widest text-left">سعر المندوب</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-50">
@@ -1096,6 +1173,58 @@ export default function App() {
                                 </div>
                               )}
                             </td>
+                            <td className="p-6 text-left font-black text-emerald-700 tabular-nums text-lg">
+                              {editingEmployeePriceUnitId === unit.id ? (
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    type="number"
+                                    step={1000}
+                                    className="w-32 bg-slate-100 border border-slate-200 rounded-lg px-2 py-1 font-black text-sm text-slate-800 outline-none"
+                                    value={tempEmployeePriceInTable}
+                                    onChange={(e) => setTempEmployeePriceInTable(e.target.value)}
+                                    autoFocus
+                                    onClick={(e) => e.stopPropagation()}
+                                  />
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const val = Number(tempEmployeePriceInTable);
+                                      if (!isNaN(val)) {
+                                        void updateUnitEmployeePrice(unit.id, val);
+                                        setEditingEmployeePriceUnitId(null);
+                                      }
+                                    }}
+                                    className="p-1 px-3 bg-primary text-white rounded-lg text-xs font-bold"
+                                  >حفظ</button>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setEditingEmployeePriceUnitId(null);
+                                    }}
+                                    className="p-1 px-3 bg-slate-100 text-slate-500 rounded-lg text-xs font-bold hover:bg-slate-200"
+                                  >إلغاء</button>
+                                </div>
+                              ) : (
+                                <div className="flex items-center justify-end gap-2 group/emp-price min-w-[200px]">
+                                  <span className="opacity-0 group-hover/emp-price:opacity-100 transition-opacity">
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setEditingEmployeePriceUnitId(unit.id);
+                                        setTempEmployeePriceInTable(unit.employeePrice || 0);
+                                      }}
+                                      className="p-1.5 text-slate-400 hover:text-primary hover:bg-primary/10 rounded-lg "
+                                    >
+                                      <Settings size={14} />
+                                    </button>
+                                  </span>
+                                  <span>
+                                    {(unit.employeePrice ?? 0).toLocaleString()}{' '}
+                                    <span className="text-[10px] opacity-40">IQD</span>
+                                  </span>
+                                </div>
+                              )}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -1157,14 +1286,22 @@ export default function App() {
                           onClick={() => openUnitModal(mapFocusedUnit)}
                           className="w-full rounded-xl bg-primary px-4 py-2 text-xs font-black text-white hover:opacity-90"
                         >
-                          فتح إجراءات الوحدة
+                          {isAdmin ? 'فتح إجراءات الوحدة' : 'عرض السعر'}
                         </button>
+                        {mapFocusedUnit.employeePrice != null && !isAdmin && (
+                          <p className="text-center text-sm font-black text-primary tabular-nums">
+                            {mapFocusedUnit.employeePrice.toLocaleString()}{' '}
+                            <span className="text-[10px] opacity-50">IQD</span>
+                          </p>
+                        )}
                       </div>
                     ) : (
                       <div className="py-8 text-center text-slate-500 space-y-2 px-2">
                         <MapIcon size={28} className="mx-auto opacity-25" />
                         <p className="text-xs font-bold leading-relaxed">
-                          حرّك المؤشر فوق أي قطعة لعرض التفاصيل، أو انقر القطعة لفتح إجراءات الوحدة.
+                          {isAdmin
+                            ? 'حرّك المؤشر فوق أي قطعة لعرض التفاصيل، أو انقر القطعة لفتح إجراءات الوحدة.'
+                            : 'انقر على الوحدات المتاحة فقط لعرض سعر العرض.'}
                         </p>
                       </div>
                     )}
@@ -1226,62 +1363,130 @@ export default function App() {
                 />
                 <DetailRow label="النوع" value={selectedUnit.unitType || 'عادي'} />
                 <DetailRow label="المساحة" value={`${selectedUnit.area || 200} م²`} />
-                <DetailRow label="الحالة" value={selectedUnit.status === UnitStatus.SOLD ? 'محجوز نهائياً' : selectedUnit.status === UnitStatus.RESERVED ? 'حجز مبدئي' : 'متاح'} />
-                <div className="space-y-1 relative group">
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest leading-none">السعر</p>
-                  {isEditingPrice ? (
-                    <div className="flex items-center gap-2 mt-1">
-                      <input 
-                        type="number"
-                        step={1000}
-                        className="w-full bg-slate-100 border border-slate-200 rounded-lg px-2 py-1 font-black text-sm text-slate-800 outline-none focus:ring-2 focus:ring-primary/20"
-                        value={tempPrice}
-                        onChange={(e) => setTempPrice(e.target.value)}
-                        autoFocus
-                      />
-                      <button 
-                        onClick={() => {
-                          const val = Number(tempPrice);
-                          if (!isNaN(val)) {
-                            void updateUnitPrice(selectedUnit.id, val);
-                            setIsEditingPrice(false);
-                            setSelectedUnit({ ...selectedUnit, price: val });
-                          }
-                        }}
-                        className="p-1 px-3 bg-primary text-white rounded-lg text-xs font-bold shadow-sm hover:bg-primary transition-colors"
-                      >حفظ</button>
-                      <button 
-                        onClick={() => setIsEditingPrice(false)}
-                        className="p-1 px-3 bg-slate-100 text-slate-500 rounded-lg text-xs font-bold hover:bg-slate-200 transition-colors"
-                      >إلغاء</button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center justify-between group">
-                      <p className="text-lg font-black text-slate-800 leading-tight tracking-tight">
-                        {selectedUnit.price != null && !Number.isNaN(selectedUnit.price) ? (
-                          <>
-                            {selectedUnit.price.toLocaleString()}{' '}
-                            <span className="text-[10px] opacity-40">IQD</span>
-                          </>
-                        ) : (
-                          <span className="text-slate-400">—</span>
-                        )}
-                      </p>
-                      {isAdmin && (
-                        <button 
-                          onClick={() => {
-                            setTempPrice(selectedUnit.price || 0);
-                            setIsEditingPrice(true);
-                          }}
-                          className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-primary hover:bg-primary/10 rounded-md text-[10px] font-bold"
-                        >تعديل</button>
+                {isAdmin && (
+                  <DetailRow label="الحالة" value={selectedUnit.status === UnitStatus.SOLD ? 'محجوز نهائياً' : selectedUnit.status === UnitStatus.RESERVED ? 'حجز مبدئي' : 'متاح'} />
+                )}
+                {isAdmin ? (
+                  <>
+                    <div className="space-y-1 relative group col-span-2">
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest leading-none">السعر الداخلي</p>
+                      {isEditingPrice ? (
+                        <div className="flex items-center gap-2 mt-1">
+                          <input
+                            type="number"
+                            step={1000}
+                            className="w-full bg-slate-100 border border-slate-200 rounded-lg px-2 py-1 font-black text-sm text-slate-800 outline-none focus:ring-2 focus:ring-primary/20"
+                            value={tempPrice}
+                            onChange={(e) => setTempPrice(e.target.value)}
+                            autoFocus
+                          />
+                          <button
+                            onClick={() => {
+                              const val = Number(tempPrice);
+                              if (!isNaN(val)) {
+                                void updateUnitPrice(selectedUnit.id, val);
+                                setIsEditingPrice(false);
+                                setSelectedUnit({ ...selectedUnit, price: val });
+                              }
+                            }}
+                            className="p-1 px-3 bg-primary text-white rounded-lg text-xs font-bold shadow-sm hover:bg-primary transition-colors"
+                          >حفظ</button>
+                          <button
+                            onClick={() => setIsEditingPrice(false)}
+                            className="p-1 px-3 bg-slate-100 text-slate-500 rounded-lg text-xs font-bold hover:bg-slate-200 transition-colors"
+                          >إلغاء</button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between group">
+                          <p className="text-lg font-black text-slate-800 leading-tight tracking-tight">
+                            {selectedUnit.price != null && !Number.isNaN(selectedUnit.price) ? (
+                              <>
+                                {selectedUnit.price.toLocaleString()}{' '}
+                                <span className="text-[10px] opacity-40">IQD</span>
+                              </>
+                            ) : (
+                              <span className="text-slate-400">—</span>
+                            )}
+                          </p>
+                          <button
+                            onClick={() => {
+                              setTempPrice(selectedUnit.price || 0);
+                              setIsEditingPrice(true);
+                            }}
+                            className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-primary hover:bg-primary/10 rounded-md text-[10px] font-bold"
+                          >تعديل</button>
+                        </div>
                       )}
                     </div>
-                  )}
-                </div>
+                    <div className="space-y-1 relative group col-span-2">
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest leading-none">سعر المندوب</p>
+                      {isEditingEmployeePrice ? (
+                        <div className="flex items-center gap-2 mt-1">
+                          <input
+                            type="number"
+                            step={1000}
+                            className="w-full bg-slate-100 border border-slate-200 rounded-lg px-2 py-1 font-black text-sm text-slate-800 outline-none focus:ring-2 focus:ring-primary/20"
+                            value={tempEmployeePrice}
+                            onChange={(e) => setTempEmployeePrice(e.target.value)}
+                            autoFocus
+                          />
+                          <button
+                            onClick={() => {
+                              const val = Number(tempEmployeePrice);
+                              if (!isNaN(val)) {
+                                void updateUnitEmployeePrice(selectedUnit.id, val);
+                                setIsEditingEmployeePrice(false);
+                                setSelectedUnit({ ...selectedUnit, employeePrice: val });
+                              }
+                            }}
+                            className="p-1 px-3 bg-primary text-white rounded-lg text-xs font-bold shadow-sm hover:bg-primary transition-colors"
+                          >حفظ</button>
+                          <button
+                            onClick={() => setIsEditingEmployeePrice(false)}
+                            className="p-1 px-3 bg-slate-100 text-slate-500 rounded-lg text-xs font-bold hover:bg-slate-200 transition-colors"
+                          >إلغاء</button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between group">
+                          <p className="text-lg font-black text-slate-800 leading-tight tracking-tight">
+                            {selectedUnit.employeePrice != null && !Number.isNaN(selectedUnit.employeePrice) ? (
+                              <>
+                                {selectedUnit.employeePrice.toLocaleString()}{' '}
+                                <span className="text-[10px] opacity-40">IQD</span>
+                              </>
+                            ) : (
+                              <span className="text-slate-400">—</span>
+                            )}
+                          </p>
+                          <button
+                            onClick={() => {
+                              setTempEmployeePrice(selectedUnit.employeePrice || 0);
+                              setIsEditingEmployeePrice(true);
+                            }}
+                            className="opacity-0 group-hover:opacity-100 transition-opacity p-1 text-primary hover:bg-primary/10 rounded-md text-[10px] font-bold"
+                          >تعديل</button>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="space-y-1 col-span-2">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest leading-none">السعر</p>
+                    <p className="text-2xl font-black text-primary leading-tight tracking-tight">
+                      {selectedUnit.employeePrice != null && !Number.isNaN(selectedUnit.employeePrice) ? (
+                        <>
+                          {selectedUnit.employeePrice.toLocaleString()}{' '}
+                          <span className="text-[10px] opacity-40">IQD</span>
+                        </>
+                      ) : (
+                        <span className="text-slate-400 text-lg">غير محدد</span>
+                      )}
+                    </p>
+                  </div>
+                )}
               </div>
 
-              {selectedUnit.status === UnitStatus.AVAILABLE ? (
+              {isAdmin && selectedUnit.status === UnitStatus.AVAILABLE ? (
                 <div className="space-y-4">
                   <div>
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">اسم العميل</label>
@@ -1315,7 +1520,7 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-              ) : selectedUnit.status === UnitStatus.SOLD ? (
+              ) : isAdmin && selectedUnit.status === UnitStatus.SOLD ? (
                 <div className="space-y-4 bg-red-50 p-6 rounded-3xl border border-red-200">
                   <div className="flex flex-col gap-1">
                     <span className="text-[10px] font-black text-red-700 uppercase tracking-widest">اسم الحاجز</span>
@@ -1328,7 +1533,7 @@ export default function App() {
                     </div>
                   )}
                 </div>
-              ) : (
+              ) : isAdmin ? (
                 <div className="space-y-4 bg-amber-50 p-6 rounded-3xl border border-amber-200">
                   <div className="flex flex-col gap-1">
                     <span className="text-[10px] font-black text-amber-800 uppercase tracking-widest">اسم الحاجز</span>
@@ -1347,41 +1552,45 @@ export default function App() {
                     </div>
                   )}
                 </div>
-              )}
+              ) : null}
 
               <div className="flex flex-col gap-3 mt-2">
-                {selectedUnit.status === UnitStatus.AVAILABLE ? (
-                  <div className="flex gap-3">
-                    <button 
-                      onClick={() => { 
-                        void handleBooking(selectedUnit.id, UnitStatus.SOLD, bookingName, bookingNote);
-                        setSelectedUnit(null); 
-                      }} 
-                      className="flex-1 py-5 rounded-3xl bg-red-600 text-white font-black text-lg shadow-xl shadow-red-900/25 hover:bg-red-700 transition-all"
-                    >تأكيد الحجز النهائي</button>
-                    <button 
-                      onClick={() => { 
-                        void handleBooking(selectedUnit.id, UnitStatus.RESERVED, bookingName, bookingNote, reservationDuration);
-                        setSelectedUnit(null); 
-                      }} 
-                      className="flex-1 py-5 rounded-3xl bg-amber-500 text-white font-black text-lg shadow-xl shadow-amber-200 hover:bg-amber-600 transition-all"
-                    >حجز مبدئي</button>
-                  </div>
-                ) : (
-                  <button 
-                    onClick={() => { 
-                      void handleBooking(selectedUnit.id, UnitStatus.AVAILABLE);
-                      setSelectedUnit(null); 
-                    }} 
-                    className="w-full py-5 rounded-3xl bg-slate-100 text-slate-700 font-black text-lg hover:bg-slate-200 transition-all"
-                  >إلغاء الحجز</button>
+                {isAdmin && (
+                  selectedUnit.status === UnitStatus.AVAILABLE ? (
+                    <div className="flex gap-3">
+                      <button
+                        onClick={() => {
+                          void handleBooking(selectedUnit.id, UnitStatus.SOLD, bookingName, bookingNote);
+                          setSelectedUnit(null);
+                        }}
+                        className="flex-1 py-5 rounded-3xl bg-red-600 text-white font-black text-lg shadow-xl shadow-red-900/25 hover:bg-red-700 transition-all"
+                      >تأكيد الحجز النهائي</button>
+                      <button
+                        onClick={() => {
+                          void handleBooking(selectedUnit.id, UnitStatus.RESERVED, bookingName, bookingNote, reservationDuration);
+                          setSelectedUnit(null);
+                        }}
+                        className="flex-1 py-5 rounded-3xl bg-amber-500 text-white font-black text-lg shadow-xl shadow-amber-200 hover:bg-amber-600 transition-all"
+                      >حجز مبدئي</button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        void handleBooking(selectedUnit.id, UnitStatus.AVAILABLE);
+                        setSelectedUnit(null);
+                      }}
+                      className="w-full py-5 rounded-3xl bg-slate-100 text-slate-700 font-black text-lg hover:bg-slate-200 transition-all"
+                    >إلغاء الحجز</button>
+                  )
                 )}
-                <button 
+                <button
                   onClick={() => {
                     setSelectedUnit(null);
                     setBookingName('');
                     setBookingNote('');
-                  }} 
+                    setIsEditingPrice(false);
+                    setIsEditingEmployeePrice(false);
+                  }}
                   className="py-2 text-slate-400 text-[10px] font-black uppercase tracking-widest hover:text-slate-900 transition-colors"
                 >
                   إغلاق
@@ -1413,20 +1622,70 @@ export default function App() {
         onConfirm={() => void handleConfirmResetDefaults()}
         onCancel={() => setResetDefaultsConfirmOpen(false)}
       />
+      <EditEmployeeModal
+        employee={editingEmployee}
+        onClose={() => setEditingEmployee(null)}
+        onRequestSave={(payload) => {
+          if (payload.role !== payload.previousRole) {
+            setPendingEmployeeUpdate({
+              userId: payload.userId,
+              userName: payload.userName,
+              name: payload.name,
+              role: payload.role,
+              nextRole: payload.role,
+            })
+            return
+          }
+          setEmployeeSaveLoading(true)
+          void (async () => {
+            try {
+              const res = await updateEmployee(payload.userId, {
+                name: payload.name,
+                role: payload.role,
+              })
+              if (res.ok === false) {
+                toast.error(res.error)
+                return
+              }
+              await reloadTeamProfiles()
+              setEditingEmployee(null)
+              toast.success('تم تحديث بيانات الموظف.')
+            } finally {
+              setEmployeeSaveLoading(false)
+            }
+          })()
+        }}
+        saveLoading={employeeSaveLoading}
+      />
       <ConfirmDialog
-        open={roleChangeRequest !== null}
+        open={pendingEmployeeUpdate !== null}
         title="تأكيد تغيير الصلاحية"
         message={
-          roleChangeRequest
-            ? `سيتم تغيير دور ${roleChangeRequest.userName} إلى ${roleChangeRequest.nextRole === 'admin' ? 'مدير' : 'مندوب'}.`
+          pendingEmployeeUpdate
+            ? `سيتم تحديث ${pendingEmployeeUpdate.userName} وتغيير دوره إلى ${pendingEmployeeUpdate.nextRole === 'admin' ? 'مدير' : 'مندوب'}.`
             : ''
         }
-        confirmLabel="تأكيد التغيير"
+        confirmLabel="تأكيد التحديث"
         cancelLabel="إلغاء"
         confirmVariant="amber"
-        confirmLoading={roleChangeLoading}
-        onConfirm={() => void handleConfirmRoleChange()}
-        onCancel={() => setRoleChangeRequest(null)}
+        confirmLoading={employeeSaveLoading}
+        onConfirm={() => void handleConfirmEmployeeUpdate()}
+        onCancel={() => setPendingEmployeeUpdate(null)}
+      />
+      <ConfirmDialog
+        open={deleteEmployeeRequest !== null}
+        title="تأكيد حذف الموظف"
+        message={
+          deleteEmployeeRequest
+            ? `سيتم حذف حساب ${deleteEmployeeRequest.userName} نهائيًا من نظام التوثيق. لا يمكن التراجع عن هذا الإجراء.`
+            : ''
+        }
+        confirmLabel="حذف"
+        cancelLabel="إلغاء"
+        confirmVariant="danger"
+        confirmLoading={deleteEmployeeLoading}
+        onConfirm={() => void handleConfirmDeleteEmployee()}
+        onCancel={() => setDeleteEmployeeRequest(null)}
       />
 
     </div>
@@ -1497,20 +1756,134 @@ function LegendItem({ color, label }: any) {
   );
 }
 
+function EditEmployeeModal({
+  employee,
+  onClose,
+  onRequestSave,
+  saveLoading,
+}: {
+  employee: ProfileRow | null
+  onClose: () => void
+  onRequestSave: (payload: {
+    userId: string
+    userName: string
+    name: string
+    role: UserRole
+    previousRole: UserRole
+  }) => void
+  saveLoading: boolean
+}) {
+  const [name, setName] = useState('')
+  const [role, setRole] = useState<UserRole>('sales')
+
+  useEffect(() => {
+    if (!employee) return
+    setName(employee.name)
+    setRole(employee.role)
+  }, [employee])
+
+  if (!employee) return null
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault()
+    const trimmed = name.trim()
+    if (!trimmed) return
+    onRequestSave({
+      userId: employee.id,
+      userName: employee.name,
+      name: trimmed,
+      role,
+      previousRole: employee.role,
+    })
+  }
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm"
+      dir="rtl"
+      onClick={() => {
+        if (!saveLoading) onClose()
+      }}
+    >
+      <form
+        onSubmit={submit}
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md bg-white rounded-[32px] border border-slate-200 shadow-2xl p-8 space-y-5"
+      >
+        <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
+          <div className="p-2 bg-primary/10 rounded-2xl text-primary">
+            <Pencil size={20} />
+          </div>
+          <div>
+            <h3 className="text-lg font-black text-slate-800">تعديل الموظف</h3>
+            <p className="text-[11px] font-bold text-slate-400">تحديث الاسم أو صلاحية الدور.</p>
+          </div>
+        </div>
+        <div>
+          <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">
+            الاسم الكامل
+          </label>
+          <input
+            type="text"
+            required
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-primary/30"
+            autoComplete="off"
+          />
+        </div>
+        <div>
+          <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">
+            الدور
+          </label>
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value as UserRole)}
+            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-primary/30"
+          >
+            <option value="sales">مندوب</option>
+            <option value="admin">مدير</option>
+          </select>
+        </div>
+        <div className="flex gap-3 pt-2">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saveLoading}
+            className="flex-1 py-3 rounded-xl border border-slate-200 text-sm font-black text-slate-500 hover:bg-slate-50 disabled:opacity-50"
+          >
+            إلغاء
+          </button>
+          <button
+            type="submit"
+            disabled={saveLoading || !name.trim()}
+            className="flex-1 py-3 rounded-xl bg-primary text-white text-sm font-black hover:opacity-95 disabled:opacity-50 flex items-center justify-center gap-2"
+          >
+            {saveLoading ? (
+              <LoadingSpinner size="sm" className="border-white/30 border-t-white" />
+            ) : null}
+            حفظ
+          </button>
+        </div>
+      </form>
+    </div>,
+    document.body,
+  )
+}
+
 function AddEmployeeForm({ onCreated }: { onCreated: () => void }) {
   const toast = useToast();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [role, setRole] = useState<UserRole>('sales');
   const [pending, setPending] = useState(false);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setPending(true);
     try {
-      const res = await createEmployee({ email, password, name, role });
+      const res = await createEmployee({ email, password, name });
       if (res.ok === false) {
         toast.error(res.error);
         return;
@@ -1519,7 +1892,6 @@ function AddEmployeeForm({ onCreated }: { onCreated: () => void }) {
       setName('');
       setEmail('');
       setPassword('');
-      setRole('sales');
       onCreated();
     } finally {
       setPending(false);
@@ -1536,8 +1908,8 @@ function AddEmployeeForm({ onCreated }: { onCreated: () => void }) {
           <UserPlus size={20} />
         </div>
         <div>
-          <h3 className="text-lg font-black text-slate-800">إضافة موظف جديد</h3>
-          <p className="text-[11px] font-bold text-slate-400">سيُنشأ حساب جديد في نظام التوثيق السحابي ويرتبط بالدور تلقائيًا.</p>
+          <h3 className="text-lg font-black text-slate-800">إضافة مندوب مبيعات</h3>
+          <p className="text-[11px] font-bold text-slate-400">يُنشأ حساب مندوب فقط. حسابات المدير تُضاف من لوحة Supabase مباشرة.</p>
         </div>
       </div>
 
@@ -1586,17 +1958,6 @@ function AddEmployeeForm({ onCreated }: { onCreated: () => void }) {
               {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
             </button>
           </div>
-        </div>
-        <div>
-          <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">الدور</label>
-          <select
-            value={role}
-            onChange={(e) => setRole(e.target.value as UserRole)}
-            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-primary/30"
-          >
-            <option value="sales">مندوب مبيعات</option>
-            <option value="admin">مدير</option>
-          </select>
         </div>
       </div>
 

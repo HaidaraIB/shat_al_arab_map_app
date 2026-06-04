@@ -82,6 +82,7 @@ export function plotToLegacyUnit(plot: Plot, map: MapData, mapBlock: MapBlock | 
     number: plot.number,
     status: plot.status as UnitStatus,
     price: typeof meta.price === 'number' ? meta.price : undefined,
+    employeePrice: typeof meta.employeePrice === 'number' ? meta.employeePrice : undefined,
     area: typeof meta.area === 'number' ? meta.area : undefined,
     unitType: meta.unitType === 'ركن' ? 'ركن' : 'عادي',
     category,

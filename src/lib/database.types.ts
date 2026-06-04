@@ -57,6 +57,7 @@ export type Database = {
           plot_id: string
           status: PlotStatusDb
           price: number | null
+          employee_price: number | null
           customer_name: string | null
           note: string | null
           reserved_at: string | null
@@ -68,6 +69,7 @@ export type Database = {
           plot_id: string
           status?: PlotStatusDb
           price?: number | null
+          employee_price?: number | null
           customer_name?: string | null
           note?: string | null
           reserved_at?: string | null
@@ -79,6 +81,7 @@ export type Database = {
           plot_id?: string
           status?: PlotStatusDb
           price?: number | null
+          employee_price?: number | null
           customer_name?: string | null
           note?: string | null
           reserved_at?: string | null
@@ -126,7 +129,12 @@ export type Database = {
       }
     }
     Views: Record<string, never>
-    Functions: Record<string, never>
+    Functions: {
+      delete_employee: {
+        Args: { target_id: string }
+        Returns: undefined
+      }
+    }
     Enums: Record<string, never>
     CompositeTypes: Record<string, never>
   }
