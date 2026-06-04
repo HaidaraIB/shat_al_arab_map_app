@@ -1,5 +1,6 @@
 import React, { memo } from 'react'
-import type { Plot } from '../../types/map'
+import type { Plot, PlotStatus } from '../../types/map'
+import { plotVisualStatus } from '../../utils/plotStatus'
 import { polygonCentroid } from '../../utils/geometry'
 import { pointsToSvgPoints } from '../../utils/svg'
 
@@ -7,12 +8,14 @@ const STATUS_FILL: Record<Plot['status'], string> = {
   available: '#86efac',
   reserved: '#fde047',
   sold: '#fecaca',
+  employee_reserved: '#ddd6fe',
 }
 
 const STATUS_STROKE: Record<Plot['status'], string> = {
   available: '#166534',
   reserved: '#a16207',
   sold: '#b91c1c',
+  employee_reserved: '#6d28d9',
 }
 
 /** Static plot chip — no pointer events (whole-map pan/zoom only). */
@@ -29,6 +32,7 @@ export const PlotPolygon = memo(
     /** Same as block title: counter parent `componentGroupTransform` rotation so digits read like “B2” / “C1”. */
     blockRotationDeg = 0,
     interactive = true,
+    adminView = true,
     onPointerEnter,
     onPointerLeave,
     onClick,
@@ -39,6 +43,8 @@ export const PlotPolygon = memo(
     selected?: boolean
     /** When false, plot is not clickable (e.g. sales view on non-available units). */
     interactive?: boolean
+    /** When false, employee_reserved plots render like sold. */
+    adminView?: boolean
     inverseScaleX?: number
     inverseScaleY?: number
     viewportScale?: number
@@ -54,8 +60,9 @@ export const PlotPolygon = memo(
       Math.abs(blockRotationDeg) > 0.08
         ? `rotate(${-blockRotationDeg}, ${c.x}, ${c.y})`
         : undefined
-    const fill = STATUS_FILL[plot.status]
-    const stroke = STATUS_STROKE[plot.status]
+    const visualStatus: PlotStatus = plotVisualStatus(plot.status, adminView)
+    const fill = STATUS_FILL[visualStatus]
+    const stroke = STATUS_STROKE[visualStatus]
     const isHot = hovered || selected
     const vs = Math.max(0.04, viewportScale)
     const sx = Math.max(0.04, inverseScaleX)
@@ -129,6 +136,7 @@ export const PlotPolygon = memo(
     a.hovered === b.hovered &&
     a.selected === b.selected &&
     a.interactive === b.interactive &&
+    a.adminView === b.adminView &&
     a.inverseScaleX === b.inverseScaleX &&
     a.inverseScaleY === b.inverseScaleY &&
     a.viewportScale === b.viewportScale &&

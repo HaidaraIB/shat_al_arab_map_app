@@ -976,6 +976,7 @@ export function MapCanvas() {
               key={plot.id}
               plot={plot}
               interactive={plotInteractiveForUser(plot)}
+              adminView={isAdmin}
               hovered={hoveredPlotId === plot.id}
               selected={selectedPlotId === plot.id}
               inverseScaleX={sx}

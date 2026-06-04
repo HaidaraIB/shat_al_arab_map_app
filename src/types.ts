@@ -2,7 +2,9 @@
 export enum UnitStatus {
   SOLD = 'sold',
   AVAILABLE = 'available',
-  RESERVED = 'reserved'
+  RESERVED = 'reserved',
+  /** Admin-only hold; sales see this as sold on the map. */
+  EMPLOYEE_RESERVED = 'employee_reserved',
 }
 
 export enum UserRole {

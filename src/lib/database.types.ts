@@ -1,8 +1,8 @@
 export type UserRole = 'admin' | 'sales'
 
-export type PlotStatusDb = 'available' | 'reserved' | 'sold'
+export type PlotStatusDb = 'available' | 'reserved' | 'sold' | 'employee_reserved'
 
-export type SalesLogAction = 'reserved' | 'sold' | 'released' | 'price_changed'
+export type SalesLogAction = 'reserved' | 'sold' | 'released' | 'price_changed' | 'employee_reserved'
 
 export type Database = {
   public: {

@@ -177,6 +177,8 @@ function legacyUnitToPlotStatus(s: UnitStatus): Plot['status'] {
       return 'sold'
     case UnitStatus.RESERVED:
       return 'reserved'
+    case UnitStatus.EMPLOYEE_RESERVED:
+      return 'employee_reserved'
     default:
       return 'available'
   }

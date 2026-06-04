@@ -8,7 +8,7 @@ export type Point = {
   y: number
 }
 
-export type PlotStatus = 'available' | 'reserved' | 'sold'
+export type PlotStatus = 'available' | 'reserved' | 'sold' | 'employee_reserved'
 
 export type Plot = {
   id: string

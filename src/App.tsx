@@ -28,6 +28,8 @@ import {
   EyeOff,
 } from 'lucide-react';
 import { Unit, UnitStatus, Block } from './types';
+import type { PlotStatus } from './types/map';
+import { isUnitAvailableForSales, unitStatusDetailAr, unitStatusLabelAr } from './utils/plotStatus';
 import type { MapData } from './types/map';
 import { legacyBlocksFromMapData } from './utils/legacyBlocksFromMap';
 import { MapCanvas } from './components/map/MapCanvas';
@@ -322,17 +324,19 @@ export default function App() {
   }, [soldUnits]);
 
   const stats = useMemo(() => {
-    let total = 0, sold = 0, reserved = 0;
+    let total = 0, sold = 0, reserved = 0, employeeReserved = 0;
     data.forEach(block => {
       block.units.forEach(unit => {
         total++;
         if (unit.status === UnitStatus.SOLD) sold++;
         if (unit.status === UnitStatus.RESERVED) reserved++;
+        if (unit.status === UnitStatus.EMPLOYEE_RESERVED) employeeReserved++;
       });
     });
+    const occupied = sold + reserved + employeeReserved;
     return {
-      total, sold, reserved, available: total - sold - reserved,
-      percentage: Math.round(((sold + reserved) / total) * 100)
+      total, sold, reserved, employeeReserved, available: total - occupied,
+      percentage: Math.round((occupied / total) * 100)
     };
   }, [data]);
 
@@ -358,13 +362,13 @@ export default function App() {
     const plot = mapData.plots.find((p) => p.id === unitId)
     if (plot) {
       updateMapPlot(unitId, {
-        status: status as 'sold' | 'reserved' | 'available',
+        status: status as PlotStatus,
         meta: {
           ...(plot.meta ?? {}),
           customerName: status !== UnitStatus.AVAILABLE ? name : undefined,
           note: status !== UnitStatus.AVAILABLE ? note : undefined,
           reservedAt: status === UnitStatus.RESERVED ? new Date().toISOString() : undefined,
-          reservedUntil: reservedUntilIso,
+          reservedUntil: status === UnitStatus.RESERVED ? reservedUntilIso : undefined,
         },
       })
       const next = useMapStore.getState().map.plots.find((p) => p.id === unitId)
@@ -376,7 +380,7 @@ export default function App() {
   }
 
   const openUnitModal = (unit: Unit) => {
-    if (!isAdmin && unit.status !== UnitStatus.AVAILABLE) return
+    if (!isAdmin && !isUnitAvailableForSales(unit.status)) return
     setSelectedUnit(unit);
     setTempPrice(unit.price || 0);
     setTempEmployeePrice(unit.employeePrice || 0);
@@ -395,7 +399,7 @@ export default function App() {
     if (!id) return null;
     const u = unitById.get(id) || null;
     if (!u) return null;
-    if (!isAdmin && u.status !== UnitStatus.AVAILABLE) return null;
+    if (!isAdmin && !isUnitAvailableForSales(u.status)) return null;
     return u;
   }, [hoveredPlotIdOnMap, selectedPlotIdOnMap, unitById, isAdmin]);
 
@@ -403,7 +407,7 @@ export default function App() {
     if (!selectedPlotIdOnMap || !plotSelectionOpensUnitModal) return;
     const u = unitById.get(selectedPlotIdOnMap);
     useMapStore.setState({ plotSelectionOpensUnitModal: false });
-    if (u && (isAdmin || u.status === UnitStatus.AVAILABLE)) openUnitModal(u);
+    if (u && (isAdmin || isUnitAvailableForSales(u.status))) openUnitModal(u);
   }, [selectedPlotIdOnMap, plotSelectionOpensUnitModal, unitById, isAdmin]);
 
   const filteredData = useMemo(() => {
@@ -804,6 +808,8 @@ export default function App() {
                         ? `بيع: ${row.plot_id}`
                         : row.action === 'reserved'
                           ? `حجز: ${row.plot_id}`
+                          : row.action === 'employee_reserved'
+                            ? `حجز للموظف: ${row.plot_id}`
                           : row.action === 'released'
                             ? `إلغاء حجز: ${row.plot_id}`
                             : `تغيير سعر: ${row.plot_id}`
@@ -812,12 +818,16 @@ export default function App() {
                         ? 'bg-red-100 text-red-600 group-hover:bg-red-600 group-hover:text-white'
                         : row.action === 'reserved'
                           ? 'bg-amber-100 text-amber-700 group-hover:bg-amber-600 group-hover:text-white'
+                          : row.action === 'employee_reserved'
+                            ? 'bg-violet-100 text-violet-700 group-hover:bg-violet-600 group-hover:text-white'
                           : 'bg-primary/10 text-primary group-hover:bg-primary group-hover:text-white'
                     const customerAccent =
                       row.action === 'sold'
                         ? 'text-red-700'
                         : row.action === 'reserved'
                           ? 'text-amber-800'
+                          : row.action === 'employee_reserved'
+                            ? 'text-violet-800'
                           : 'text-primary'
                     return (
                       <motion.div
@@ -1344,12 +1354,11 @@ export default function App() {
               <div className="flex justify-between items-start">
                 <div><h3 className="text-3xl font-black text-slate-900">وحدة {selectedUnit.number}</h3><p className="text-slate-400 font-bold flex items-center gap-2 mt-1 px-1 tracking-tight">بلوك {selectedUnit.block}</p></div>
                 <div className={`px-4 py-2 rounded-2xl text-[10px] font-black uppercase tracking-widest ${
-                  selectedUnit.status === UnitStatus.SOLD ? 'bg-red-100 text-red-800' : 
+                  selectedUnit.status === UnitStatus.SOLD ? 'bg-red-100 text-red-800' :
                   selectedUnit.status === UnitStatus.RESERVED ? 'bg-amber-100 text-amber-700' :
+                  selectedUnit.status === UnitStatus.EMPLOYEE_RESERVED ? 'bg-violet-100 text-violet-800' :
                   'bg-green-100 text-green-700'}`}>
-                  {selectedUnit.status === UnitStatus.SOLD ? 'محجوزة نهائياً' : 
-                   selectedUnit.status === UnitStatus.RESERVED ? 'حجز مبدئي' : 
-                   'متاحة للبيع'}
+                  {unitStatusLabelAr(selectedUnit.status, isAdmin)}
                 </div>
               </div>
 
@@ -1364,7 +1373,7 @@ export default function App() {
                 <DetailRow label="النوع" value={selectedUnit.unitType || 'عادي'} />
                 <DetailRow label="المساحة" value={`${selectedUnit.area || 200} م²`} />
                 {isAdmin && (
-                  <DetailRow label="الحالة" value={selectedUnit.status === UnitStatus.SOLD ? 'محجوز نهائياً' : selectedUnit.status === UnitStatus.RESERVED ? 'حجز مبدئي' : 'متاح'} />
+                  <DetailRow label="الحالة" value={unitStatusDetailAr(selectedUnit.status, isAdmin)} />
                 )}
                 {isAdmin ? (
                   <>
@@ -1533,6 +1542,19 @@ export default function App() {
                     </div>
                   )}
                 </div>
+              ) : isAdmin && selectedUnit.status === UnitStatus.EMPLOYEE_RESERVED ? (
+                <div className="space-y-4 bg-violet-50 p-6 rounded-3xl border border-violet-200">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[10px] font-black text-violet-700 uppercase tracking-widest">حجز للموظف</span>
+                    <span className="text-lg font-black text-violet-900">{selectedUnit.customerName || 'غير محدد'}</span>
+                  </div>
+                  {selectedUnit.note && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[10px] font-black text-violet-700 uppercase tracking-widest">الملاحظات</span>
+                      <p className="text-sm font-medium text-violet-900 leading-relaxed">{selectedUnit.note}</p>
+                    </div>
+                  )}
+                </div>
               ) : isAdmin ? (
                 <div className="space-y-4 bg-amber-50 p-6 rounded-3xl border border-amber-200">
                   <div className="flex flex-col gap-1">
@@ -1557,6 +1579,7 @@ export default function App() {
               <div className="flex flex-col gap-3 mt-2">
                 {isAdmin && (
                   selectedUnit.status === UnitStatus.AVAILABLE ? (
+                    <>
                     <div className="flex gap-3">
                       <button
                         onClick={() => {
@@ -1573,6 +1596,14 @@ export default function App() {
                         className="flex-1 py-5 rounded-3xl bg-amber-500 text-white font-black text-lg shadow-xl shadow-amber-200 hover:bg-amber-600 transition-all"
                       >حجز مبدئي</button>
                     </div>
+                    <button
+                      onClick={() => {
+                        void handleBooking(selectedUnit.id, UnitStatus.EMPLOYEE_RESERVED, bookingName, bookingNote);
+                        setSelectedUnit(null);
+                      }}
+                      className="w-full py-4 rounded-3xl bg-violet-600 text-white font-black text-base shadow-xl shadow-violet-200 hover:bg-violet-700 transition-all"
+                    >حجز للموظف</button>
+                    </>
                   ) : (
                     <button
                       onClick={() => {
@@ -1719,7 +1750,8 @@ function StatCard({ label, value, icon, sub }: any) {
 function UnitBox({ unit, onClick }: any) {
   return (
     <motion.button whileHover={{ scale: 1.1, y: -2 }} whileTap={{ scale: 0.9 }} onClick={onClick} className={`aspect-square rounded-2xl flex flex-col items-center justify-center gap-1 border-2 transition-all shadow-sm ${
-      unit.status === UnitStatus.SOLD ? 'border-red-600 bg-red-600 text-white shadow-red-900/25' : 
+      unit.status === UnitStatus.SOLD ? 'border-red-600 bg-red-600 text-white shadow-red-900/25' :
+      unit.status === UnitStatus.EMPLOYEE_RESERVED ? 'border-violet-600 bg-violet-600 text-white shadow-violet-900/25' :
       unit.status === UnitStatus.RESERVED ? 'border-amber-500 bg-amber-500 text-white shadow-amber-200' :
       'border-slate-100 bg-white text-slate-600 hover:border-primary/20 hover:bg-primary/10'
     }`}>
