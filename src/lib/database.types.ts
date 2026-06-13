@@ -54,6 +54,7 @@ export type Database = {
       }
       plot_state: {
         Row: {
+          map_id: string
           plot_id: string
           status: PlotStatusDb
           price: number | null
@@ -66,6 +67,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          map_id?: string
           plot_id: string
           status?: PlotStatusDb
           price?: number | null
@@ -78,6 +80,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          map_id?: string
           plot_id?: string
           status?: PlotStatusDb
           price?: number | null
@@ -94,6 +97,7 @@ export type Database = {
       sales_log: {
         Row: {
           id: string
+          map_id: string
           plot_id: string
           actor_id: string | null
           action: SalesLogAction
@@ -105,6 +109,7 @@ export type Database = {
         }
         Insert: {
           id?: string
+          map_id?: string
           plot_id: string
           actor_id?: string | null
           action: SalesLogAction
@@ -116,6 +121,7 @@ export type Database = {
         }
         Update: {
           id?: string
+          map_id?: string
           plot_id?: string
           actor_id?: string | null
           action?: SalesLogAction

@@ -1,10 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { TransformComponent, TransformWrapper, type ReactZoomPanPinchRef } from 'react-zoom-pan-pinch'
 import { useMapStore } from '../../store/mapStore'
-import type { Block, ComponentTransform, Facility, MapData, MapLabel, Plot, Road } from '../../types/map'
+import type { Block, ComponentTransform, DrawingState, Facility, MapData, MapLabel, Plot, Road } from '../../types/map'
 import { defaultComponentTransform } from '../../types/map'
 import {
   blockLabelStripLayout,
+  blockLabelStripTextAnchor,
+  BLOCK_GRID_DIM_MAX,
+  BLOCK_GRID_DIM_MIN,
+  LABEL_STRIP_RATIO_DEFAULT,
+  labelStripDepthScale,
+  normalizeLabelStripRatio,
   plotCellPolygonFromGridQuad,
   polygonBounds,
   polygonCentroid,
@@ -12,19 +18,23 @@ import {
 } from '../../utils/geometry'
 import {
   componentGroupTransform,
+  componentLocalFromSvgPoint,
   pointsToSvgPoints,
+  pointsToSvgPath,
+  polygonWithHolesToSvgPath,
   resolvedComponentScale,
   screenToSvgPoint,
   undoComponentScaleAt,
 } from '../../utils/svg'
 import { mapContentSheetSize } from '../../utils/mapContentSheet'
 import { categoryForNewPlotInBlock, effectiveBlockLabel } from '../../utils/legacyBlocksFromMap'
-import { isCBlock, toolbarCellToInternal, toolbarGridDimensions } from '../../utils/blockToolbarGrid'
+import { isCBlock, toolbarCellToInternal, toolbarGridDimensions, toolbarGridToInternal } from '../../utils/blockToolbarGrid'
 import { Label } from './Label'
 import { PlotPolygon } from './PlotPolygon'
 import { RoadPath } from './RoadPath'
 import { ConfirmDialog } from './ConfirmDialog'
 import { Toolbar } from './Toolbar'
+import { VertexHandle } from './VertexHandle'
 import { useAuth } from '../../lib/auth'
 import { reloadMapFromServer } from '../../store/mapStore'
 import { useToast } from '../ui/Toast'
@@ -175,9 +185,9 @@ type BlockMarkerLayout =
 function blockMarkerLayout(block: Block, marker: MapLabel): BlockMarkerLayout {
   const label = marker.text || block.label
   const fs = marker.fontSize ?? 13
-  const strip = blockLabelStripLayout(block, {
-    stripDepthRatio: block.labelStripDepthRatio,
-  })
+  const ratio = normalizeLabelStripRatio(block.labelStripDepthRatio)
+  const strip =
+    ratio > 0 ? blockLabelStripLayout(block, { stripDepthRatio: ratio }) : null
   if (strip) {
     return {
       mode: 'quad',
@@ -191,16 +201,30 @@ function blockMarkerLayout(block: Block, marker: MapLabel): BlockMarkerLayout {
       ny: strip.ny,
     }
   }
+  if (block.polygon.length === 4) {
+    const anchor = blockLabelStripTextAnchor(block)
+    if (anchor) {
+      return {
+        mode: 'quad',
+        corners: [],
+        cx: anchor.cx,
+        cy: anchor.cy,
+        label,
+        fs,
+        stripDepth: 0,
+        nx: anchor.nx,
+        ny: anchor.ny,
+      }
+    }
+  }
   const polyBb = polygonBounds(block.polygon)
-  const ratio = block.labelStripDepthRatio ?? 0.4
-  const r = Math.min(0.65, Math.max(0.22, ratio))
-  const depthScale = 1.08 + r * 0.46
+  const depthScale = labelStripDepthScale(ratio)
   const cellH = Math.max(4, (polyBb.maxY - polyBb.minY) / Math.max(1, block.rows ?? 1))
-  const gap = 8 + r * 8
-  const rowH = cellH * depthScale + gap * 0.35
+  const gap = ratio > 0 ? 8 + ratio * 8 : 0
+  const rowH = ratio > 0 ? cellH * depthScale + gap * 0.35 : 0
   const w = Math.max(8, polyBb.maxX - polyBb.minX)
   const x = polyBb.minX
-  const y = polyBb.minY - gap - rowH
+  const y = ratio > 0 ? polyBb.minY - gap - rowH : polyBb.minY
   const h = rowH
   return {
     mode: 'rect',
@@ -209,7 +233,7 @@ function blockMarkerLayout(block: Block, marker: MapLabel): BlockMarkerLayout {
     width: w,
     height: h,
     cx: x + w / 2,
-    cy: y + h / 2,
+    cy: ratio > 0 ? y + h / 2 : polyBb.minY,
     label,
     fs,
     stripDepth: h,
@@ -367,12 +391,14 @@ export function MapCanvas() {
   const setSelectedZIndex = useMapStore((s) => s.setSelectedZIndex)
   const importMap = useMapStore((s) => s.importMap)
   const exportMap = useMapStore((s) => s.exportMap)
+  const activeMapId = useMapStore((s) => s.activeMapId)
   const previewMode = useMapStore((s) => s.previewMode)
   const setPreviewMode = useMapStore((s) => s.setPreviewMode)
   const publishDesign = useMapStore((s) => s.publishDesign)
   const reseedPlotState = useMapStore((s) => s.reseedPlotState)
   const addPlot = useMapStore((s) => s.addPlot)
   const updatePlot = useMapStore((s) => s.updatePlot)
+  const setBlockPlotsLabelFontSize = useMapStore((s) => s.setBlockPlotsLabelFontSize)
   const deletePlot = useMapStore((s) => s.deletePlot)
   const addRoad = useMapStore((s) => s.addRoad)
   const addBlock = useMapStore((s) => s.addBlock)
@@ -388,6 +414,15 @@ export function MapCanvas() {
   const deleteSelectedComponents = useMapStore((s) => s.deleteSelectedComponents)
   const selectComponentsOnly = useMapStore((s) => s.selectComponentsOnly)
   const moveComponentsBy = useMapStore((s) => s.moveComponentsBy)
+  const editorTool = useMapStore((s) => s.editorTool)
+  const drawing = useMapStore((s) => s.drawing)
+  const startDrawingFacility = useMapStore((s) => s.startDrawingFacility)
+  const appendFacilityPoint = useMapStore((s) => s.appendFacilityPoint)
+  const closeFacilityRing = useMapStore((s) => s.closeFacilityRing)
+  const startFacilityHole = useMapStore((s) => s.startFacilityHole)
+  const finishDrawingFacility = useMapStore((s) => s.finishDrawingFacility)
+  const cancelDrawing = useMapStore((s) => s.cancelDrawing)
+  const updateFacilityVertex = useMapStore((s) => s.updateFacilityVertex)
 
   const ct = map.componentTransforms ?? {}
 
@@ -446,6 +481,13 @@ export function MapCanvas() {
         }
         deleteSelectedComponents()
       }
+      if (e.key === 'Escape') {
+        const state = useMapStore.getState()
+        if (state.drawing.mode === 'facility') {
+          e.preventDefault()
+          cancelDrawing()
+        }
+      }
     }
     const onBlur = () => setIsTransformMode(false)
     window.addEventListener('keydown', onKey)
@@ -456,7 +498,7 @@ export function MapCanvas() {
       window.removeEventListener('keyup', onKey)
       window.removeEventListener('blur', onBlur)
     }
-  }, [deletePlot, deleteSelectedComponents, redo, selectedPlotId, undo])
+  }, [cancelDrawing, deletePlot, deleteSelectedComponents, redo, selectedPlotId, undo])
 
   /** While Ctrl/Meta is held, infra hit targets exclude pan/zoom so component selection/drag stays usable. */
   const [mapTransformBlockInfra, setMapTransformBlockInfra] = useState(false)
@@ -561,6 +603,39 @@ export function MapCanvas() {
     [clickToggleComponent, moveComponentsBy],
   )
 
+  const startFacilityVertexDrag = useCallback(
+    (
+      e: React.PointerEvent,
+      facilityId: string,
+      pivot: { x: number; y: number },
+      transform: ComponentTransform,
+      ring: 'outer' | number,
+      vertexIndex: number,
+    ) => {
+      e.stopPropagation()
+      e.preventDefault()
+      if (!svgRef.current) return
+
+      const move = (ev: PointerEvent) => {
+        if (!svgRef.current) return
+        const world = screenToSvgPoint(svgRef.current, ev.clientX, ev.clientY)
+        const local = componentLocalFromSvgPoint(world, pivot, transform)
+        updateFacilityVertex(facilityId, ring, vertexIndex, local)
+      }
+
+      const up = () => {
+        window.removeEventListener('pointermove', move)
+        window.removeEventListener('pointerup', up)
+        window.removeEventListener('pointercancel', up)
+      }
+
+      window.addEventListener('pointermove', move)
+      window.addEventListener('pointerup', up)
+      window.addEventListener('pointercancel', up)
+    },
+    [updateFacilityVertex],
+  )
+
   const plotInteractiveForUser = useCallback(
     (plot: Plot) => isAdmin || plot.status === 'available',
     [isAdmin],
@@ -618,7 +693,7 @@ export function MapCanvas() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = 'shat-al-arab-default-map.json'
+      a.download = `shat-al-arab-${activeMapId}-map.json`
       document.body.appendChild(a)
       a.click()
       a.remove()
@@ -766,6 +841,14 @@ export function MapCanvas() {
 
     const selPoly = selectedKeys.includes(keyPoly)
     const bbPoly = pointsBoundingBox(f.polygon, 4)
+    const hasHoles = Boolean(f.holes && f.holes.length > 0)
+    const showVertexHandles =
+      isAdmin &&
+      editorTool === 'select' &&
+      selPoly &&
+      selectedKeys.length === 1 &&
+      selectedKeys[0] === keyPoly
+    const fill = facilityFill(f.kind)
 
     return (
       <g
@@ -775,14 +858,56 @@ export function MapCanvas() {
         onPointerDown={(e) => startComponentDrag(e, keyPoly)}
         onDoubleClick={(e) => selectComponentExclusive(e, keyPoly)}
       >
-        <polygon
-          points={pointsToSvgPoints(f.polygon)}
-          fill={facilityFill(f.kind)}
-          fillOpacity={0.92}
-          stroke="#64748b"
-          strokeWidth={1}
-          className="map-infra-hit"
-        />
+        {hasHoles ? (
+          <path
+            d={polygonWithHolesToSvgPath(f.polygon, f.holes ?? [])}
+            fill={fill}
+            fillRule="evenodd"
+            fillOpacity={0.92}
+            stroke="#64748b"
+            strokeWidth={1}
+            className="map-infra-hit"
+          />
+        ) : (
+          <polygon
+            points={pointsToSvgPoints(f.polygon)}
+            fill={fill}
+            fillOpacity={0.92}
+            stroke="#64748b"
+            strokeWidth={1}
+            className="map-infra-hit"
+          />
+        )}
+        {showVertexHandles && (
+          <g className="pointer-events-auto">
+            {f.polygon.map((p, i) => (
+              <VertexHandle
+                key={`${f.id}-outer-v-${i}`}
+                x={p.x}
+                y={p.y}
+                index={i}
+                variant="outer"
+                onPointerDown={(ev) =>
+                  startFacilityVertexDrag(ev, f.id, pivot, tPoly, 'outer', i)
+                }
+              />
+            ))}
+            {(f.holes ?? []).map((hole, hi) =>
+              hole.map((p, vi) => (
+                <VertexHandle
+                  key={`${f.id}-hole-${hi}-v-${vi}`}
+                  x={p.x}
+                  y={p.y}
+                  index={vi}
+                  variant="hole"
+                  onPointerDown={(ev) =>
+                    startFacilityVertexDrag(ev, f.id, pivot, tPoly, hi, vi)
+                  }
+                />
+              )),
+            )}
+          </g>
+        )}
         {selPoly && (
           <rect
             x={bbPoly.x}
@@ -930,25 +1055,26 @@ export function MapCanvas() {
             Math.abs(t.rotationDeg) > 0.08 ? `rotate(${-t.rotationDeg}, ${tx}, ${ty})` : undefined
           return (
             <g className="pointer-events-none">
-              {lay.mode === 'quad' ? (
-                <polygon
-                  points={pointsToSvgPoints(lay.corners)}
-                  fill="#f8fafc"
-                  stroke="#cbd5e1"
-                  strokeWidth={1}
-                />
-              ) : (
-                <rect
-                  x={lay.x}
-                  y={lay.y}
-                  width={lay.width}
-                  height={lay.height}
-                  rx={6}
-                  fill="#f8fafc"
-                  stroke="#cbd5e1"
-                  strokeWidth={1}
-                />
-              )}
+              {depth > 0 &&
+                (lay.mode === 'quad' ? (
+                  <polygon
+                    points={pointsToSvgPoints(lay.corners)}
+                    fill="#f8fafc"
+                    stroke="#cbd5e1"
+                    strokeWidth={1}
+                  />
+                ) : (
+                  <rect
+                    x={lay.x}
+                    y={lay.y}
+                    width={lay.width}
+                    height={lay.height}
+                    rx={6}
+                    fill="#f8fafc"
+                    stroke="#cbd5e1"
+                    strokeWidth={1}
+                  />
+                ))}
               <g transform={undoComponentScaleAt(tx, ty, sx, sy)}>
                 <g transform={counterRot}>
                   <text
@@ -1167,6 +1293,16 @@ export function MapCanvas() {
       const el = e.target as Element
       if (el.closest('.map-infra-select')) return
 
+      const state = useMapStore.getState()
+      if (state.editorTool === 'drawFacility' && state.drawing.mode === 'facility') {
+        e.preventDefault()
+        e.stopPropagation()
+        if (!svgRef.current) return
+        const p = screenToSvgPoint(svgRef.current, e.clientX, e.clientY)
+        state.appendFacilityPoint(p)
+        return
+      }
+
       const mod = e.ctrlKey || e.metaKey
       if (!mod) {
         clearComponentSelection()
@@ -1232,6 +1368,58 @@ export function MapCanvas() {
     },
     [clearComponentSelection, collectKeysInMarquee, selectComponentsOnly, selectPlot],
   )
+
+  const renderFacilityDrawingPreview = (draw: Extract<DrawingState, { mode: 'facility' }>) => {
+    const { outer, holes, currentRing, stage } = draw
+    const openPts = currentRing.length > 0 ? pointsToSvgPoints(currentRing) : ''
+    return (
+      <g className="pointer-events-none">
+        {outer.length >= 3 && (
+          <path
+            d={polygonWithHolesToSvgPath(outer, holes)}
+            fill="#e0e7ff"
+            fillRule="evenodd"
+            fillOpacity={0.55}
+            stroke="#4f46e5"
+            strokeWidth={1.5}
+          />
+        )}
+        {holes.map((hole, i) =>
+          hole.length >= 3 ? (
+            <polygon
+              key={`hole-preview-${i}`}
+              points={pointsToSvgPoints(hole)}
+              fill="none"
+              stroke="#d97706"
+              strokeWidth={1.5}
+              strokeDasharray="4 3"
+            />
+          ) : null,
+        )}
+        {openPts && (
+          <polyline
+            points={openPts}
+            fill="none"
+            stroke={stage === 'hole' ? '#d97706' : '#2563eb'}
+            strokeWidth={2}
+            strokeDasharray="6 4"
+          />
+        )}
+        {currentRing.map((p, i) => (
+          <circle
+            key={`draw-v-${i}`}
+            cx={p.x}
+            cy={p.y}
+            r={4}
+            className={stage === 'hole' ? 'fill-amber-500' : 'fill-blue-500'}
+          />
+        ))}
+        {outer.map((p, i) => (
+          <circle key={`outer-v-${i}`} cx={p.x} cy={p.y} r={3} className="fill-indigo-400" />
+        ))}
+      </g>
+    )
+  }
 
   const layeredComponentKeys = useMemo(() => {
     const base = allComponentKeys
@@ -1363,17 +1551,111 @@ export function MapCanvas() {
     if (!selectedBlockIdForToolbar) return null
     const bl = map.blocks.find((b) => b.id === selectedBlockIdForToolbar)
     if (!bl) return null
-    const r = bl.labelStripDepthRatio ?? 0.4
-    return Math.round(Math.min(0.65, Math.max(0.22, r)) * 100)
+    return Math.round(normalizeLabelStripRatio(bl.labelStripDepthRatio) * 100)
   }, [map.blocks, selectedBlockIdForToolbar])
 
   const handleSetBlockLabelStripPercent = useCallback(
     (pct: number) => {
       if (!selectedBlockIdForToolbar) return
-      const ratio = Math.min(0.65, Math.max(0.22, pct / 100))
+      const ratio = normalizeLabelStripRatio(pct / 100)
       patchBlock(selectedBlockIdForToolbar, { labelStripDepthRatio: ratio })
     },
     [patchBlock, selectedBlockIdForToolbar],
+  )
+
+  const selectedBlockForToolbar = useMemo(
+    () =>
+      selectedBlockIdForToolbar
+        ? map.blocks.find((b) => b.id === selectedBlockIdForToolbar) ?? null
+        : null,
+    [map.blocks, selectedBlockIdForToolbar],
+  )
+
+  const selectedBlockToolbarGrid = useMemo(() => {
+    if (!selectedBlockForToolbar) return null
+    const dims = toolbarGridDimensions(selectedBlockForToolbar)
+    const stats = computeBlockAddStats(selectedBlockForToolbar, map.plots)
+    return {
+      rows: dims.rows,
+      cols: dims.cols,
+      minRows: Math.max(BLOCK_GRID_DIM_MIN, stats.occupiedRows),
+      minCols: Math.max(BLOCK_GRID_DIM_MIN, stats.occupiedCols),
+    }
+  }, [map.plots, selectedBlockForToolbar])
+
+  const handleSetBlockToolbarGrid = useCallback(
+    (toolbarRows: number, toolbarCols: number) => {
+      if (!selectedBlockIdForToolbar || !selectedBlockForToolbar) return
+      const stats = computeBlockAddStats(selectedBlockForToolbar, map.plots)
+      const tr = Math.max(
+        BLOCK_GRID_DIM_MIN,
+        Math.min(BLOCK_GRID_DIM_MAX, Math.floor(toolbarRows)),
+      )
+      const tc = Math.max(
+        BLOCK_GRID_DIM_MIN,
+        Math.min(BLOCK_GRID_DIM_MAX, Math.floor(toolbarCols)),
+      )
+      if (tr < stats.occupiedRows || tc < stats.occupiedCols) {
+        toast.warning('لا يمكن تصغير الشبكة دون نطاق الوحدات المشغولة.')
+        return
+      }
+      const { rows: newRows, cols: newCols } = toolbarGridToInternal(
+        selectedBlockForToolbar,
+        tr,
+        tc,
+      )
+      const oldRows = Math.max(1, selectedBlockForToolbar.rows ?? 1)
+      const oldCols = Math.max(1, selectedBlockForToolbar.cols ?? 1)
+      if (newRows < oldRows || newCols < oldCols) {
+        for (const p of map.plots.filter((x) => x.blockId === selectedBlockIdForToolbar)) {
+          const r = Number(p.meta?.row)
+          const c = Number(p.meta?.col)
+          if (!Number.isFinite(r) || !Number.isFinite(c)) continue
+          if (r >= newRows || c >= newCols) deletePlot(p.id)
+        }
+      }
+      setBlockGrid(selectedBlockIdForToolbar, newRows, newCols)
+    },
+    [
+      deletePlot,
+      map.plots,
+      selectedBlockForToolbar,
+      selectedBlockIdForToolbar,
+      setBlockGrid,
+      toast,
+    ],
+  )
+
+  const handleSetBlockToolbarRows = useCallback(
+    (rows: number) => {
+      if (!selectedBlockToolbarGrid) return
+      handleSetBlockToolbarGrid(rows, selectedBlockToolbarGrid.cols)
+    },
+    [handleSetBlockToolbarGrid, selectedBlockToolbarGrid],
+  )
+
+  const handleSetBlockToolbarCols = useCallback(
+    (cols: number) => {
+      if (!selectedBlockToolbarGrid) return
+      handleSetBlockToolbarGrid(selectedBlockToolbarGrid.rows, cols)
+    },
+    [handleSetBlockToolbarGrid, selectedBlockToolbarGrid],
+  )
+
+  const selectedBlockPlotFontSize = useMemo(() => {
+    if (!selectedBlockIdForToolbar) return null
+    const plots = map.plots.filter((p) => p.blockId === selectedBlockIdForToolbar)
+    if (plots.length === 0) return 9
+    return plots[0].labelFontSize ?? 9
+  }, [map.plots, selectedBlockIdForToolbar])
+
+  const handleSetBlockPlotFontSize = useCallback(
+    (raw: number) => {
+      if (!selectedBlockIdForToolbar) return
+      const n = Math.min(64, Math.max(4, Math.round(raw)))
+      setBlockPlotsLabelFontSize(selectedBlockIdForToolbar, n)
+    },
+    [selectedBlockIdForToolbar, setBlockPlotsLabelFontSize],
   )
 
   const handleSetSelectionFontSize = useCallback(
@@ -1519,6 +1801,7 @@ export function MapCanvas() {
       label: id.toUpperCase(),
       rows: 1,
       cols: 1,
+      labelStripDepthRatio: LABEL_STRIP_RATIO_DEFAULT,
       polygon: [
         { x: c.x - w / 2, y: c.y - h / 2 },
         { x: c.x + w / 2, y: c.y - h / 2 },
@@ -1816,6 +2099,7 @@ export function MapCanvas() {
                     vectorEffect="non-scaling-stroke"
                   />
                 ) : null}
+                {drawing.mode === 'facility' ? renderFacilityDrawingPreview(drawing) : null}
               </svg>
             </div>
           </TransformComponent>
@@ -1825,7 +2109,8 @@ export function MapCanvas() {
       <Toolbar
         componentTransform={primaryTransform}
         hideElementScaleSliders={Boolean(
-          primarySelectedKey?.startsWith('label:') || primarySelectedKey?.startsWith('facility-label:'),
+          primarySelectedKey?.startsWith('label:') ||
+            primarySelectedKey?.startsWith('facility-label:'),
         )}
         hasSelection={selectedKeys.length > 0}
         selectionCount={selectedKeys.length}
@@ -1850,6 +2135,13 @@ export function MapCanvas() {
         onAddRoad={addContextRoad}
         onAddBlock={addContextBlock}
         onAddFacility={addContextFacility}
+        onStartDrawFacility={startDrawingFacility}
+        onCloseFacilityRing={closeFacilityRing}
+        onStartFacilityHole={startFacilityHole}
+        onFinishDrawFacility={finishDrawingFacility}
+        onCancelDrawFacility={cancelDrawing}
+        facilityDrawing={drawing.mode === 'facility' ? drawing : null}
+        editorTool={editorTool}
         onAddLabel={addContextLabel}
         canUndo={canUndo}
         canRedo={canRedo}
@@ -1866,6 +2158,14 @@ export function MapCanvas() {
         onFitView={fitView}
         selectedBlockLabelStripPercent={selectedBlockLabelStripPercent}
         onSetBlockLabelStripPercent={handleSetBlockLabelStripPercent}
+        selectedBlockToolbarRows={selectedBlockToolbarGrid?.rows ?? null}
+        selectedBlockToolbarCols={selectedBlockToolbarGrid?.cols ?? null}
+        minBlockToolbarRows={selectedBlockToolbarGrid?.minRows ?? null}
+        minBlockToolbarCols={selectedBlockToolbarGrid?.minCols ?? null}
+        onSetBlockToolbarRows={handleSetBlockToolbarRows}
+        onSetBlockToolbarCols={handleSetBlockToolbarCols}
+        selectedBlockPlotFontSize={selectedBlockPlotFontSize}
+        onSetBlockPlotFontSize={handleSetBlockPlotFontSize}
         selectionFontSize={selectionFontSize}
         onSetSelectionFontSize={handleSetSelectionFontSize}
         selectionSubLabelFontSize={selectionSubLabelFontSize}

@@ -179,6 +179,9 @@ export function resizeGridQuad(polygon: Point[], oldRows: number, oldCols: numbe
   ]
 }
 
+export const BLOCK_GRID_DIM_MIN = 1
+export const BLOCK_GRID_DIM_MAX = 24
+
 /**
  * Corners of one grid cell on a 4-point quadrilateral (same convention as `resizeGridQuad`: p0 TL, p1 TR, p2 BR, p3 BL).
  */
@@ -235,21 +238,76 @@ export function nearestGridCellIndex(
   return { row: bestR, col: bestC }
 }
 
+export const LABEL_STRIP_RATIO_MIN = 0
+export const LABEL_STRIP_RATIO_MAX = 1
+export const LABEL_STRIP_RATIO_DEFAULT = 1
+
+export function normalizeLabelStripRatio(r?: number): number {
+  const v = r ?? LABEL_STRIP_RATIO_DEFAULT
+  return Math.min(LABEL_STRIP_RATIO_MAX, Math.max(LABEL_STRIP_RATIO_MIN, v))
+}
+
+/** Fraction of one grid cell step used as strip depth (0 = no strip). */
+export function labelStripDepthScale(ratio: number): number {
+  return normalizeLabelStripRatio(ratio)
+}
+
+/** Outward normal and edge midpoint for block title text when strip depth is zero. */
+export function blockLabelStripTextAnchor(
+  block: Block,
+): { cx: number; cy: number; nx: number; ny: number } | null {
+  const poly = block.polygon
+  if (poly.length !== 4) return null
+  const [p0, p1, , p3] = poly
+  const R = Math.max(1, block.rows ?? 1)
+  const C = Math.max(1, block.cols ?? 1)
+  const colStep = { x: (p1.x - p0.x) / C, y: (p1.y - p0.y) / C }
+  const rowStep = { x: (p3.x - p0.x) / R, y: (p3.y - p0.y) / R }
+  const wideLayout = C > R
+
+  if (!wideLayout) {
+    const ex = p1.x - p0.x
+    const ey = p1.y - p0.y
+    let nx = -ey
+    let ny = ex
+    const nl = Math.hypot(nx, ny) || 1
+    nx /= nl
+    ny /= nl
+    if (nx * rowStep.x + ny * rowStep.y > 0) {
+      nx = -nx
+      ny = -ny
+    }
+    return { cx: (p0.x + p1.x) / 2, cy: (p0.y + p1.y) / 2, nx, ny }
+  }
+
+  const lx = p3.x - p0.x
+  const ly = p3.y - p0.y
+  let nx = -ly
+  let ny = lx
+  const nl = Math.hypot(nx, ny) || 1
+  nx /= nl
+  ny /= nl
+  if (nx * colStep.x + ny * colStep.y > 0) {
+    nx = -nx
+    ny = -ny
+  }
+  return { cx: (p0.x + p3.x) / 2, cy: (p0.y + p3.y) / 2, nx, ny }
+}
+
 /**
  * Label strip attached like an extra grid band:
  * - When rows ≥ cols (“vertical” grid): outside the **first row** (along top edge p0→p1).
  * - When cols > rows (“horizontal” grid): outside **column 0** (along left edge p0→p3).
- * Depth is **slightly larger than one unit row/column** (special header band). `stripDepthRatio`
- * (toolbar 22–65%) adds extra thickness on top of that baseline.
+ * `stripDepthRatio` (toolbar 0–100%) is the strip depth as a fraction of one cell step.
  */
 export function blockLabelStripLayout(
   block: Block,
-  opts?: { /** Extra scale 0.22–0.65 from toolbar; widens/narrows the band around the “~1.12× cell” baseline. */
+  opts?: { /** 0–1 from toolbar; fraction of one cell step along strip normal. */
     stripDepthRatio?: number },
 ): { corners: Point[]; cx: number; cy: number; stripDepth: number; nx: number; ny: number } | null {
-  const ratio = Math.min(0.65, Math.max(0.22, opts?.stripDepthRatio ?? 0.4))
-  /** ~1.12× one cell, nudged by slider toward ~1.05×–1.38× */
-  const depthScale = 1.08 + ratio * 0.46
+  const ratio = normalizeLabelStripRatio(opts?.stripDepthRatio)
+  if (ratio <= 0) return null
+  const depthScale = labelStripDepthScale(ratio)
   const poly = block.polygon
   if (poly.length !== 4) return null
   const [p0, p1, , p3] = poly

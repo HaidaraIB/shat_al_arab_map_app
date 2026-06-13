@@ -55,7 +55,10 @@ export function mergePlotStateIntoMap(map: MapData, rows: PlotStateRow[]): MapDa
   }
 }
 
-export function plotStateRowsFromMap(map: MapData): Omit<PlotStateRow, 'updated_at' | 'updated_by'>[] {
+export function plotStateRowsFromMap(
+  map: MapData,
+  mapId: string,
+): Omit<PlotStateRow, 'updated_at' | 'updated_by'>[] {
   return map.plots.map((p) => {
     const meta = (p.meta ?? {}) as Record<string, unknown>
     const price = typeof meta.price === 'number' ? meta.price : meta.price != null ? Number(meta.price) : null
@@ -66,6 +69,7 @@ export function plotStateRowsFromMap(map: MapData): Omit<PlotStateRow, 'updated_
           ? Number(meta.employeePrice)
           : null
     return {
+      map_id: mapId,
       plot_id: p.id,
       status: p.status,
       price: Number.isFinite(price as number) ? (price as number) : null,
@@ -78,7 +82,10 @@ export function plotStateRowsFromMap(map: MapData): Omit<PlotStateRow, 'updated_
   })
 }
 
-export function plotToRemotePatch(plot: Plot): Omit<PlotStateRow, 'updated_at' | 'updated_by'> {
+export function plotToRemotePatch(
+  plot: Plot,
+  mapId: string,
+): Omit<PlotStateRow, 'updated_at' | 'updated_by'> {
   const meta = (plot.meta ?? {}) as Record<string, unknown>
   const price = typeof meta.price === 'number' ? meta.price : meta.price != null ? Number(meta.price) : null
   const employeePrice =
@@ -88,6 +95,7 @@ export function plotToRemotePatch(plot: Plot): Omit<PlotStateRow, 'updated_at' |
         ? Number(meta.employeePrice)
         : null
   return {
+    map_id: mapId,
     plot_id: plot.id,
     status: plot.status,
     price: Number.isFinite(price as number) ? (price as number) : null,

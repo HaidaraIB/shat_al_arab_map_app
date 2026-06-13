@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import type { ComponentTransform } from '../../types/map'
+import type { ComponentTransform, DrawingState, EditorTool } from '../../types/map'
+import { BLOCK_GRID_DIM_MAX } from '../../utils/geometry'
 import { ConfirmDialog } from './ConfirmDialog'
 
 type Props = {
@@ -33,6 +34,13 @@ type Props = {
   onAddRoad: () => void
   onAddBlock: () => void
   onAddFacility: () => void
+  onStartDrawFacility: () => void
+  onCloseFacilityRing: () => void
+  onStartFacilityHole: () => void
+  onFinishDrawFacility: () => void
+  onCancelDrawFacility: () => void
+  facilityDrawing: Extract<DrawingState, { mode: 'facility' }> | null
+  editorTool: EditorTool
   onAddLabel: () => void
   canUndo: boolean
   canRedo: boolean
@@ -49,9 +57,19 @@ type Props = {
   onZoomIn: () => void
   onZoomOut: () => void
   onFitView: () => void
-  /** 22–65 = % of one cell step along strip normal; null when no block selected. */
+  /** 0–100 = % of one cell step along strip normal; null when no block selected. */
   selectedBlockLabelStripPercent?: number | null
   onSetBlockLabelStripPercent?: (percent: number) => void
+  /** Toolbar row/col counts (C-block aware); null when no block selected. */
+  selectedBlockToolbarRows?: number | null
+  selectedBlockToolbarCols?: number | null
+  minBlockToolbarRows?: number | null
+  minBlockToolbarCols?: number | null
+  onSetBlockToolbarRows?: (rows: number) => void
+  onSetBlockToolbarCols?: (cols: number) => void
+  /** Plot label font size for all units in selected block; null when no block selected. */
+  selectedBlockPlotFontSize?: number | null
+  onSetBlockPlotFontSize?: (size: number) => void
   /** When true, hide عرض/ارتفاع العنصر — no visual effect for standalone text / facility caption (font size is used instead). */
   hideElementScaleSliders?: boolean
   /** Map-units font size for the current text selection (plot, road, block title, free label, facility title). */
@@ -88,6 +106,13 @@ export function Toolbar({
   onAddRoad,
   onAddBlock,
   onAddFacility,
+  onStartDrawFacility,
+  onCloseFacilityRing,
+  onStartFacilityHole,
+  onFinishDrawFacility,
+  onCancelDrawFacility,
+  facilityDrawing,
+  editorTool,
   onAddLabel,
   canUndo,
   canRedo,
@@ -104,6 +129,14 @@ export function Toolbar({
   onFitView,
   selectedBlockLabelStripPercent = null,
   onSetBlockLabelStripPercent,
+  selectedBlockToolbarRows = null,
+  selectedBlockToolbarCols = null,
+  minBlockToolbarRows = null,
+  minBlockToolbarCols = null,
+  onSetBlockToolbarRows,
+  onSetBlockToolbarCols,
+  selectedBlockPlotFontSize = null,
+  onSetBlockPlotFontSize,
   hideElementScaleSliders = false,
   selectionFontSize = null,
   onSetSelectionFontSize,
@@ -192,6 +225,7 @@ export function Toolbar({
               <>
                 <li>Ctrl/Cmd+نقر تحديد سريع</li>
                 <li>Ctrl/Cmd+سحب على الخلفية تحديد مستطيل</li>
+                <li>Esc إلغاء رسم المرفق</li>
               </>
             )}
           </ul>
@@ -309,8 +343,8 @@ export function Toolbar({
                 </div>
                 <input
                   type="range"
-                  min={22}
-                  max={65}
+                  min={0}
+                  max={100}
                   step={1}
                   value={selectedBlockLabelStripPercent}
                   onChange={(e) => onSetBlockLabelStripPercent(Number(e.target.value))}
@@ -318,6 +352,97 @@ export function Toolbar({
                   aria-label="ارتفاع شريط عنوان البلوك"
                 />
                 <p className="text-[9px] text-slate-500 leading-snug">سُمك الشريط فوق الصف أو العمود الأول.</p>
+              </div>
+            )}
+            {selectedBlockToolbarCols != null &&
+              minBlockToolbarCols != null &&
+              onSetBlockToolbarCols && (
+              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-bold text-slate-700">عدد الأعمدة</span>
+                  <span className="text-[10px] font-bold tabular-nums text-slate-600">
+                    {selectedBlockToolbarCols}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={minBlockToolbarCols}
+                  max={BLOCK_GRID_DIM_MAX}
+                  step={1}
+                  value={selectedBlockToolbarCols}
+                  onChange={(e) => onSetBlockToolbarCols(Number(e.target.value))}
+                  className="w-full accent-indigo-600"
+                  aria-label="عدد الأعمدة"
+                />
+                <p className="text-[9px] text-slate-500 leading-snug">
+                  يوسّع أو يقلّص عدد أعمدة الشبكة.
+                </p>
+              </div>
+            )}
+            {selectedBlockToolbarRows != null &&
+              minBlockToolbarRows != null &&
+              onSetBlockToolbarRows && (
+              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-bold text-slate-700">عدد الصفوف</span>
+                  <span className="text-[10px] font-bold tabular-nums text-slate-600">
+                    {selectedBlockToolbarRows}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={minBlockToolbarRows}
+                  max={BLOCK_GRID_DIM_MAX}
+                  step={1}
+                  value={selectedBlockToolbarRows}
+                  onChange={(e) => onSetBlockToolbarRows(Number(e.target.value))}
+                  className="w-full accent-indigo-600"
+                  aria-label="عدد الصفوف"
+                />
+                <p className="text-[9px] text-slate-500 leading-snug">
+                  يوسّع أو يقلّص عدد صفوف الشبكة.
+                </p>
+              </div>
+            )}
+            {selectedBlockPlotFontSize != null && onSetBlockPlotFontSize && (
+              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-bold text-slate-700">حجم خط الوحدات</span>
+                  <span className="text-[10px] font-bold tabular-nums text-slate-600">
+                    {selectedBlockPlotFontSize}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => onSetBlockPlotFontSize(selectedBlockPlotFontSize - 1)}
+                    className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                    aria-label="تصغير خط الوحدات"
+                  >
+                    −
+                  </button>
+                  <input
+                    type="range"
+                    min={4}
+                    max={64}
+                    step={1}
+                    value={selectedBlockPlotFontSize}
+                    onChange={(e) => onSetBlockPlotFontSize(Number(e.target.value))}
+                    className="min-w-0 flex-1 accent-indigo-600"
+                    aria-label="حجم خط الوحدات"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => onSetBlockPlotFontSize(selectedBlockPlotFontSize + 1)}
+                    className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                    aria-label="تكبير خط الوحدات"
+                  >
+                    +
+                  </button>
+                </div>
+                <p className="text-[9px] text-slate-500 leading-snug">
+                  يطبَّق على كل الوحدات داخل البلوك المحدد.
+                </p>
               </div>
             )}
             {selectionFontSize != null && onSetSelectionFontSize && (
@@ -621,12 +746,67 @@ export function Toolbar({
               </button>
               <button
                 type="button"
+                onClick={onStartDrawFacility}
+                className={`rounded-lg border px-2 py-1.5 text-[11px] font-bold ${
+                  editorTool === 'drawFacility'
+                    ? 'border-indigo-300 bg-indigo-50 text-indigo-800'
+                    : 'border-slate-200 text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                رسم مرفق
+              </button>
+              <button
+                type="button"
                 onClick={onAddLabel}
                 className="rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
               >
                 إضافة نص
               </button>
             </div>
+            {facilityDrawing && (
+              <div className="rounded-lg border border-indigo-200 bg-indigo-50/80 p-2 space-y-1.5">
+                <p className="text-[10px] font-bold text-indigo-900">
+                  {facilityDrawing.stage === 'outer' && facilityDrawing.outer.length === 0
+                    ? 'انقر على الخريطة لرسم الحد الخارجي'
+                    : facilityDrawing.stage === 'hole'
+                      ? 'انقر لرسم فراغ داخلي'
+                      : 'الحد الخارجي جاهز — أضف فراغًا أو أنهِ'}
+                </p>
+                <div className="flex flex-wrap gap-1">
+                  <button
+                    type="button"
+                    onClick={onCloseFacilityRing}
+                    disabled={facilityDrawing.currentRing.length < 3}
+                    className="rounded-md border border-indigo-200 bg-white px-2 py-1 text-[10px] font-bold text-indigo-800 hover:bg-indigo-50 disabled:opacity-40"
+                  >
+                    إغلاق الحلقة
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onStartFacilityHole}
+                    disabled={facilityDrawing.outer.length < 3}
+                    className="rounded-md border border-amber-200 bg-white px-2 py-1 text-[10px] font-bold text-amber-800 hover:bg-amber-50 disabled:opacity-40"
+                  >
+                    إضافة فراغ
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onFinishDrawFacility}
+                    disabled={facilityDrawing.outer.length < 3}
+                    className="rounded-md border border-emerald-200 bg-white px-2 py-1 text-[10px] font-bold text-emerald-800 hover:bg-emerald-50 disabled:opacity-40"
+                  >
+                    إنهاء
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onCancelDrawFacility}
+                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 hover:bg-slate-50"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
           <div className="border-t border-slate-100 pt-2 space-y-2">
             <p className="text-[10px] font-bold text-slate-500">تحويل العنصر المحدد</p>
@@ -659,7 +839,7 @@ export function Toolbar({
                 <input
                   type="range"
                   min={0.25}
-                  max={3}
+                  max={30}
                   step={0.05}
                   value={t.scaleX}
                   disabled={!hasSelection}
@@ -673,7 +853,7 @@ export function Toolbar({
                 <input
                   type="range"
                   min={0.25}
-                  max={3}
+                  max={30}
                   step={0.05}
                   value={t.scaleY}
                   disabled={!hasSelection}

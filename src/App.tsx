@@ -37,6 +37,7 @@ import { ConfirmDialog } from './components/map/ConfirmDialog';
 import { LoadingSpinner } from './components/ui/LoadingIndicator';
 import { useToast } from './components/ui/Toast';
 import { useMapStore, bootstrapPublicMap } from './store/mapStore';
+import { MAP_ZONES, getZoneConfig, type MapZoneId } from './config/zones';
 import { useAuth } from './lib/auth';
 import { getSupabase, isSupabaseConfigured } from './lib/supabase';
 import { publishDesignRemote, upsertPlotStateFromPlot, reseedPlotStateRemote } from './lib/mapRemote';
@@ -62,6 +63,44 @@ const DEFAULT_CONFIGS: Record<'A' | 'B' | 'C', CategoryConfig> = {
 };
 
 const CATEGORY_CONFIGS_STORAGE_KEY = 'shat_al_arab_category_configs_v1'
+const LEGACY_CATEGORY_CONFIGS_STORAGE_KEY = CATEGORY_CONFIGS_STORAGE_KEY
+
+function categoryConfigsStorageKey(mapId: MapZoneId): string {
+  return `shat_al_arab_category_configs_${mapId}_v1`
+}
+
+function zonePrefsStorageKey(mapId: MapZoneId): string {
+  return `shat_al_arab_zone_prefs_${mapId}_v1`
+}
+
+type ZonePrefs = {
+  reservationDuration: number
+  manualCollectionRate: number | null
+}
+
+function loadZonePrefs(mapId: MapZoneId): ZonePrefs {
+  if (typeof window === 'undefined') return { reservationDuration: 24, manualCollectionRate: null }
+  try {
+    const raw = window.localStorage.getItem(zonePrefsStorageKey(mapId))
+    if (!raw) return { reservationDuration: 24, manualCollectionRate: null }
+    const p = JSON.parse(raw) as Partial<ZonePrefs>
+    return {
+      reservationDuration: typeof p.reservationDuration === 'number' ? p.reservationDuration : 24,
+      manualCollectionRate: typeof p.manualCollectionRate === 'number' ? p.manualCollectionRate : null,
+    }
+  } catch {
+    return { reservationDuration: 24, manualCollectionRate: null }
+  }
+}
+
+function persistZonePrefs(mapId: MapZoneId, prefs: ZonePrefs): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(zonePrefsStorageKey(mapId), JSON.stringify(prefs))
+  } catch {
+    // ignore quota / private mode
+  }
+}
 
 function cloneCategoryConfigs(c: Record<'A' | 'B' | 'C', CategoryConfig>): Record<'A' | 'B' | 'C', CategoryConfig> {
   return {
@@ -119,10 +158,16 @@ function deriveCategoryConfigsFromMap(map: MapData): Record<'A' | 'B' | 'C', Cat
   return out
 }
 
-function loadCategoryConfigsFromStorage(): Record<'A' | 'B' | 'C', CategoryConfig> | null {
+function loadCategoryConfigsFromStorage(mapId: MapZoneId = 'default'): Record<'A' | 'B' | 'C', CategoryConfig> | null {
   if (typeof window === 'undefined') return null
   try {
-    const raw = window.localStorage.getItem(CATEGORY_CONFIGS_STORAGE_KEY)
+    const keys = [categoryConfigsStorageKey(mapId)]
+    if (mapId === 'default') keys.push(LEGACY_CATEGORY_CONFIGS_STORAGE_KEY)
+    let raw: string | null = null
+    for (const key of keys) {
+      raw = window.localStorage.getItem(key)
+      if (raw) break
+    }
     if (!raw) return null
     const p = JSON.parse(raw) as unknown
     if (!p || typeof p !== 'object') return null
@@ -154,10 +199,10 @@ function loadCategoryConfigsFromStorage(): Record<'A' | 'B' | 'C', CategoryConfi
   }
 }
 
-function persistCategoryConfigsToStorage(c: Record<'A' | 'B' | 'C', CategoryConfig>): void {
+function persistCategoryConfigsToStorage(c: Record<'A' | 'B' | 'C', CategoryConfig>, mapId: MapZoneId): void {
   if (typeof window === 'undefined') return
   try {
-    window.localStorage.setItem(CATEGORY_CONFIGS_STORAGE_KEY, JSON.stringify(c))
+    window.localStorage.setItem(categoryConfigsStorageKey(mapId), JSON.stringify(c))
   } catch {
     // ignore quota / private mode
   }
@@ -191,12 +236,11 @@ export default function App() {
   const toast = useToast();
   const { profile, isAdmin, signOut } = useAuth();
   const initialCategoryConfigs = useMemo(
-    () => cloneCategoryConfigs(loadCategoryConfigsFromStorage() ?? DEFAULT_CONFIGS),
+    () => cloneCategoryConfigs(loadCategoryConfigsFromStorage('default') ?? DEFAULT_CONFIGS),
     [],
   );
   const [configs, setConfigs] = useState(initialCategoryConfigs);
   const [savedConfigs, setSavedConfigs] = useState(() => cloneCategoryConfigs(initialCategoryConfigs));
-  const configsHydratedFromMapRef = useRef(false);
   const [settingsSaveLoading, setSettingsSaveLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [filter, setFilter] = useState<'all' | UnitStatus>('all');
@@ -243,16 +287,55 @@ export default function App() {
   const plotSelectionOpensUnitModal = useMapStore((s) => s.plotSelectionOpensUnitModal);
   const hoveredPlotIdOnMap = useMapStore((s) => s.hoveredPlotId);
   const mapData = useMapStore((s) => s.map);
+  const activeMapId = useMapStore((s) => s.activeMapId);
+  const setActiveMapId = useMapStore((s) => s.setActiveMapId);
   const updateMapPlot = useMapStore((s) => s.updatePlot);
+  const activeZone = useMemo(() => getZoneConfig(activeMapId), [activeMapId]);
+
+  const handleZoneChange = React.useCallback((nextZoneId: MapZoneId) => {
+    if (nextZoneId === activeMapId) return
+    persistCategoryConfigsToStorage(configs, activeMapId)
+    persistZonePrefs(activeMapId, {
+      reservationDuration,
+      manualCollectionRate,
+    })
+    setActiveMapId(nextZoneId)
+  }, [activeMapId, configs, reservationDuration, manualCollectionRate, setActiveMapId])
+
+  const configsLoadedForZoneRef = useRef<MapZoneId | null>(null)
 
   useEffect(() => {
-    if (configsHydratedFromMapRef.current) return;
-    if (!mapData.plots?.length) return;
-    const derived = deriveCategoryConfigsFromMap(mapData);
-    setConfigs(derived);
-    setSavedConfigs(cloneCategoryConfigs(derived));
-    configsHydratedFromMapRef.current = true;
-  }, [mapData]);
+    const prefs = loadZonePrefs(activeMapId)
+    setReservationDuration(prefs.reservationDuration)
+    setManualCollectionRate(prefs.manualCollectionRate)
+
+    const stored = loadCategoryConfigsFromStorage(activeMapId)
+    if (stored) {
+      setConfigs(stored)
+      setSavedConfigs(cloneCategoryConfigs(stored))
+      configsLoadedForZoneRef.current = activeMapId
+      return
+    }
+
+    configsLoadedForZoneRef.current = null
+    const defaults = cloneCategoryConfigs(DEFAULT_CONFIGS)
+    setConfigs(defaults)
+    setSavedConfigs(defaults)
+  }, [activeMapId])
+
+  useEffect(() => {
+    if (configsLoadedForZoneRef.current === activeMapId) return
+    if (loadCategoryConfigsFromStorage(activeMapId)) return
+    if (!mapData.plots?.length) return
+    const derived = deriveCategoryConfigsFromMap(mapData)
+    setConfigs(derived)
+    setSavedConfigs(cloneCategoryConfigs(derived))
+    configsLoadedForZoneRef.current = activeMapId
+  }, [activeMapId, mapData])
+
+  useEffect(() => {
+    persistZonePrefs(activeMapId, { reservationDuration, manualCollectionRate })
+  }, [activeMapId, reservationDuration, manualCollectionRate])
 
   useEffect(() => {
     void bootstrapPublicMap()
@@ -272,6 +355,7 @@ export default function App() {
     void supabase
       .from('sales_log')
       .select('*')
+      .eq('map_id', activeMapId)
       .order('created_at', { ascending: false })
       .limit(200)
       .then(({ data }) => {
@@ -279,12 +363,13 @@ export default function App() {
       })
 
     const ch = supabase
-      .channel('sales_log_ins')
+      .channel(`sales_log_ins_${activeMapId}`)
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'sales_log' },
         (payload) => {
           const row = payload.new as SalesLogRow
+          if (row.map_id !== activeMapId) return
           setSalesLog((prev) => [row, ...prev].slice(0, 200))
         },
       )
@@ -293,7 +378,7 @@ export default function App() {
     return () => {
       void supabase.removeChannel(ch)
     }
-  }, [])
+  }, [activeMapId])
 
   const reloadTeamProfiles = React.useCallback(async () => {
     const supabase = getSupabase()
@@ -343,7 +428,7 @@ export default function App() {
   const updateUnitPrice = async (unitId: string, newPrice: number) => {
     updateMapPlot(unitId, { meta: { ...(mapData.plots.find((p) => p.id === unitId)?.meta ?? {}), price: newPrice } })
     const plot = useMapStore.getState().map.plots.find((p) => p.id === unitId)
-    if (plot) await upsertPlotStateFromPlot(plot)
+    if (plot) await upsertPlotStateFromPlot(plot, activeMapId)
   }
 
   const updateUnitEmployeePrice = async (unitId: string, newEmployeePrice: number) => {
@@ -351,7 +436,7 @@ export default function App() {
       meta: { ...(mapData.plots.find((p) => p.id === unitId)?.meta ?? {}), employeePrice: newEmployeePrice },
     })
     const plot = useMapStore.getState().map.plots.find((p) => p.id === unitId)
-    if (plot) await upsertPlotStateFromPlot(plot)
+    if (plot) await upsertPlotStateFromPlot(plot, activeMapId)
   }
 
   const handleBooking = async (unitId: string, status: UnitStatus, name?: string, note?: string, durationHours?: number) => {
@@ -372,7 +457,7 @@ export default function App() {
         },
       })
       const next = useMapStore.getState().map.plots.find((p) => p.id === unitId)
-      if (next) await upsertPlotStateFromPlot(next)
+      if (next) await upsertPlotStateFromPlot(next, activeMapId)
     }
 
     setBookingName('')
@@ -434,8 +519,8 @@ export default function App() {
     if (!isSupabaseConfigured()) {
       return { plotStateError: null as string | null, designError: null as string | null }
     }
-    const plotStateResult = await reseedPlotStateRemote(map)
-    const designResult = await publishDesignRemote(map)
+    const plotStateResult = await reseedPlotStateRemote(map, activeMapId)
+    const designResult = await publishDesignRemote(map, activeMapId)
     const plotStateError = plotStateResult.error ?? null
     const designError = designResult.error ?? null
     if (plotStateError) console.warn('[settings] plot_state sync:', plotStateError)
@@ -467,7 +552,7 @@ export default function App() {
       if (ok) {
         const next = cloneCategoryConfigs(configs)
         setSavedConfigs(next)
-        persistCategoryConfigsToStorage(next)
+        persistCategoryConfigsToStorage(next, activeMapId)
         toast.success(
           isSupabaseConfigured()
             ? 'تم حفظ إعدادات المشروع ومزامنتها مع الخادم.'
@@ -502,7 +587,7 @@ export default function App() {
       setResetDefaultsConfirmOpen(false)
       if (ok) {
         setSavedConfigs(defaults)
-        persistCategoryConfigsToStorage(defaults)
+        persistCategoryConfigsToStorage(defaults, activeMapId)
         toast.success('تم استعادة الإعدادات الافتراضية وحفظها.')
       } else {
         const msg = [plotStateError, designError].filter(Boolean).join(' · ')
@@ -609,7 +694,7 @@ export default function App() {
         )}
 
         {!isFullscreen && (
-          <header className="h-20 bg-white border-b border-slate-200 px-8 py-4 flex items-center justify-between shrink-0 z-40 pr-20">
+          <header className="h-20 bg-white border-b border-slate-200 px-8 py-4 flex items-center justify-between shrink-0 z-40 pr-20 gap-4">
           <div className="flex items-center gap-4 bg-slate-100 rounded-2xl px-4 py-2 w-full max-w-lg border border-slate-200/50">
             <Search size={18} className="text-slate-400" />
             <input 
@@ -618,7 +703,8 @@ export default function App() {
               value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
             />
           </div>
-          <div className="flex bg-slate-100 rounded-xl p-1 border border-slate-200/50 hidden md:flex">
+          <ZoneTabBar activeMapId={activeMapId} onChange={handleZoneChange} />
+          <div className="flex bg-slate-100 rounded-xl p-1 border border-slate-200/50 hidden md:flex shrink-0">
             <FilterTab active={filter === 'all'} onClick={() => setFilter('all')}>الكل</FilterTab>
             <FilterTab active={filter === UnitStatus.AVAILABLE} onClick={() => setFilter(UnitStatus.AVAILABLE)}>المتبقية</FilterTab>
             <FilterTab active={filter === UnitStatus.SOLD} onClick={() => setFilter(UnitStatus.SOLD)}>المباعة</FilterTab>
@@ -630,8 +716,12 @@ export default function App() {
           <AnimatePresence mode="wait">
             {view === 'dashboard' ? (
               <motion.div key="dashboard" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="h-full overflow-y-auto p-8 space-y-8">
+                <div>
+                  <h2 className="text-2xl font-black text-slate-900 tracking-tight">لوحة التحكم — {activeZone.labelAr}</h2>
+                  <p className="text-slate-400 font-bold mt-1 text-sm">إحصائيات ووحدات {activeZone.labelAr}</p>
+                </div>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-                  <StatCard label="إجمالي الوحدات" value={stats.total} icon={<Building2 className="text-blue-500" />} sub="الزون الأول" />
+                  <StatCard label="إجمالي الوحدات" value={stats.total} icon={<Building2 className="text-blue-500" />} sub={activeZone.labelAr} />
                   <StatCard label="الوحدات المباعة" value={stats.sold} icon={<CheckCircle2 className="text-red-600" />} sub={`${stats.percentage}% مباع`} />
                   <StatCard label="الوحدات المتبقية" value={stats.available} icon={<Circle className="text-amber-500" />} sub={`${100 - stats.percentage}% متبقي`} />
                   <div className="bg-primary rounded-3xl p-6 text-white shadow-lg shadow-primary/20 relative overflow-hidden group">
@@ -706,7 +796,10 @@ export default function App() {
             ) : view === 'sales_reports' ? (
               <motion.div key="sales_reports" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="h-full overflow-y-auto p-8 space-y-8">
                 <div className="flex items-center justify-between">
-                  <h2 className="text-3xl font-black text-slate-900 tracking-tight">تقارير المبيعات التفصيلية</h2>
+                  <div>
+                    <h2 className="text-3xl font-black text-slate-900 tracking-tight">تقارير المبيعات — {activeZone.labelAr}</h2>
+                    <p className="text-slate-400 font-bold mt-1 text-sm">مبيعات وعمليات {activeZone.labelAr} فقط</p>
+                  </div>
                   <div className="flex gap-4">
                     <div className="px-6 py-3 bg-red-600 text-white rounded-2xl shadow-lg shadow-red-900/25 flex items-center gap-3">
                       <TrendingUp size={20} />
@@ -791,8 +884,8 @@ export default function App() {
               <motion.div key="notifications" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 1.05 }} className="h-full overflow-y-auto p-8 space-y-6 max-w-3xl mx-auto">
                 <div className="flex items-center justify-between mb-8">
                   <div>
-                    <h2 className="text-3xl font-black text-slate-900 tracking-tight">التنبيهات والنشاطات</h2>
-                    <p className="text-slate-400 font-bold mt-1 tracking-tight">سجل العمليات الأخير للمشروع</p>
+                    <h2 className="text-3xl font-black text-slate-900 tracking-tight">التنبيهات — {activeZone.labelAr}</h2>
+                    <p className="text-slate-400 font-bold mt-1 tracking-tight">سجل العمليات الأخير لـ {activeZone.labelAr}</p>
                   </div>
                   <div className="p-4 bg-white border border-slate-200 rounded-[24px] shadow-sm flex items-center gap-4">
                     <Bell className="text-amber-500" />
@@ -1003,8 +1096,8 @@ export default function App() {
               <motion.div key="settings" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 1.02 }} className="h-full min-h-0 overflow-y-auto flex flex-col p-8 gap-6">
                 <div className="flex items-center justify-between shrink-0">
                   <div>
-                    <h2 className="text-3xl font-black text-slate-900 tracking-tight">إعدادات المشروع العام</h2>
-                    <p className="text-slate-400 font-bold mt-1 tracking-tight uppercase">التحكم بالأسعار الداخلية وسعر المندوب والمساحات لجميع الفئات</p>
+                    <h2 className="text-3xl font-black text-slate-900 tracking-tight">إعدادات {activeZone.labelAr}</h2>
+                    <p className="text-slate-400 font-bold mt-1 tracking-tight uppercase">التحكم بالأسعار والمساحات لـ {activeZone.labelAr}</p>
                   </div>
                   <div className="flex flex-wrap items-center gap-3">
                     <button
@@ -1252,7 +1345,7 @@ export default function App() {
                 <div className={`flex-1 min-w-0 bg-white ${isFullscreen ? 'rounded-0' : 'rounded-[40px] border border-slate-200 shadow-2xl'} overflow-visible relative flex flex-col min-h-0`}>
                   <div className={`p-6 border-b border-slate-100 flex justify-between items-center bg-white/80 backdrop-blur-md z-10 ${isFullscreen ? 'sticky top-0' : ''}`}>
                     <div>
-                      <h3 className="font-black text-slate-800 text-lg">مخطط الزون الأول</h3>
+                      <h3 className="font-black text-slate-800 text-lg">{activeZone.titleAr}</h3>
                       <p className="text-[10px] font-bold text-slate-400 tracking-widest">مدينة شط العرب السكنية</p>
                     </div>
                     <div className="flex gap-4 items-center">
@@ -1318,7 +1411,7 @@ export default function App() {
                   </div>
                   <div className="bg-slate-900 rounded-[32px] p-6 text-white shadow-2xl relative overflow-hidden grow flex flex-col">
                     <Building2 className="absolute -bottom-6 -left-6 opacity-10" size={120} />
-                    <h4 className="text-lg font-black mb-4">ملخص الزون</h4>
+                    <h4 className="text-lg font-black mb-4">ملخص {activeZone.labelAr}</h4>
                     <div className="space-y-4 relative z-10 flex-1">
                       <div className="flex justify-between text-xs font-bold opacity-60"><span>نسبة المبيع الكلية</span><span>{stats.percentage}%</span></div>
                       <div className="h-2 w-full bg-white/10 rounded-full overflow-hidden">
@@ -1730,6 +1823,33 @@ function SidebarItem({ icon, label, active = false, badge, className = '', onCli
       {badge && <span className={`${active ? 'bg-white text-primary' : 'bg-primary text-white'} text-[9px] px-2 py-0.5 rounded-full font-black`}>{badge}</span>}
     </button>
   );
+}
+
+function ZoneTabBar({
+  activeMapId,
+  onChange,
+}: {
+  activeMapId: MapZoneId
+  onChange: (id: MapZoneId) => void
+}) {
+  return (
+    <div className="flex bg-slate-100 rounded-xl p-1 border border-slate-200 shrink-0">
+      {MAP_ZONES.map((zone) => (
+        <button
+          key={zone.id}
+          type="button"
+          onClick={() => onChange(zone.id)}
+          className={`px-4 py-1.5 rounded-lg text-[10px] font-black transition-all ${
+            activeMapId === zone.id
+              ? 'bg-slate-900 text-white shadow-md'
+              : 'text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          {zone.labelAr}
+        </button>
+      ))}
+    </div>
+  )
 }
 
 function FilterTab({ children, active, onClick }: any) {

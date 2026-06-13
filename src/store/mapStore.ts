@@ -20,9 +20,11 @@ import {
   plotCellPolygonFromGridQuad,
   polygonCentroid,
   resizeGridQuad,
+  snapToGrid,
   translatePolygon,
 } from '../utils/geometry'
 import { publicInitialMapUrl } from '../config/publicMap'
+import type { MapZoneId } from '../config/zones'
 import { isSupabaseConfigured } from '../lib/supabase'
 import {
   fetchRemoteMapBundle,
@@ -61,8 +63,27 @@ function remapPlotsToBlockGrid(plots: Plot[], blockId: string, quad: Point[], ro
   })
 }
 
-const MAP_DEFAULT_STORAGE_KEY = 'shat_al_arab_map_default_design_v1'
-const MAP_WORKING_STORAGE_KEY = 'shat_al_arab_map_working_design_v1'
+const LEGACY_DEFAULT_STORAGE_KEY = 'shat_al_arab_map_default_design_v1'
+const LEGACY_WORKING_STORAGE_KEY = 'shat_al_arab_map_working_design_v1'
+
+function mapWorkingStorageKey(mapId: MapZoneId): string {
+  return `shat_al_arab_map_${mapId}_working_v1`
+}
+
+function mapDefaultStorageKey(mapId: MapZoneId): string {
+  return `shat_al_arab_map_${mapId}_default_v1`
+}
+
+function readStoredMapForZone(mapId: MapZoneId, kind: 'working' | 'default'): MapData | null {
+  const key = kind === 'working' ? mapWorkingStorageKey(mapId) : mapDefaultStorageKey(mapId)
+  const data = readStoredMap(key)
+  if (data) return data
+  if (mapId === 'default') {
+    const legacyKey = kind === 'working' ? LEGACY_WORKING_STORAGE_KEY : LEGACY_DEFAULT_STORAGE_KEY
+    return readStoredMap(legacyKey)
+  }
+  return null
+}
 
 function hasStorage(): boolean {
   return typeof window !== 'undefined' && !!window.localStorage
@@ -153,21 +174,28 @@ function emptyMapData(): MapData {
   }
 }
 
-/** Filled after `fetch` in bootstrap; used by reset/load default when nothing saved under the default key. */
-let cachedPublicMap: MapData | null = null
+/** Per-zone public JSON cache filled after fetch in bootstrap / zone switch. */
+const cachedPublicMaps: Partial<Record<MapZoneId, MapData>> = {}
 
-function resolveInitialMap(): MapData {
+function resolveInitialMap(mapId: MapZoneId = 'default'): MapData {
   if (isSupabaseConfigured()) {
     return withInitializedZIndex(emptyMapData())
   }
-  const defaultDesign = readStoredMap(MAP_DEFAULT_STORAGE_KEY)
-  const workingDesign = readStoredMap(MAP_WORKING_STORAGE_KEY)
+  const defaultDesign = readStoredMapForZone(mapId, 'default')
+  const workingDesign = readStoredMapForZone(mapId, 'working')
   return withInitializedZIndex(cloneMap(workingDesign ?? defaultDesign ?? emptyMapData()))
 }
 
-function resolveDefaultMap(): MapData {
-  const fromStorage = readStoredMap(MAP_DEFAULT_STORAGE_KEY)
-  const base = fromStorage ?? cachedPublicMap ?? emptyMapData()
+function resolveDefaultMap(mapId: MapZoneId): MapData {
+  const fromStorage = readStoredMapForZone(mapId, 'default')
+  const base = fromStorage ?? cachedPublicMaps[mapId] ?? emptyMapData()
+  return withInitializedZIndex(cloneMap(base))
+}
+
+function resolveLocalMap(mapId: MapZoneId): MapData {
+  const workingDesign = readStoredMapForZone(mapId, 'working')
+  const defaultDesign = readStoredMapForZone(mapId, 'default')
+  const base = workingDesign ?? defaultDesign ?? cachedPublicMaps[mapId] ?? emptyMapData()
   return withInitializedZIndex(cloneMap(base))
 }
 
@@ -222,6 +250,7 @@ const defaultLayers: MapLayerVisibility = {
 }
 
 type MapState = {
+  activeMapId: MapZoneId
   map: MapData
   canUndo: boolean
   canRedo: boolean
@@ -237,6 +266,8 @@ type MapState = {
   viewport: MapViewport
   /** Selected components: `road:*`, `facility:*`, `facility-label:*`, `block:*`. */
   selectedComponentKeys: string[]
+
+  setActiveMapId: (id: MapZoneId) => void
 
   setViewport: (v: Partial<MapViewport>) => void
   undo: () => void
@@ -274,6 +305,7 @@ type MapState = {
 
   addPlot: (plot: Plot) => void
   updatePlot: (id: string, patch: Partial<Plot>) => void
+  setBlockPlotsLabelFontSize: (blockId: string, size: number) => void
   deletePlot: (id: string) => void
   updateVertex: (plotId: string, vertexIndex: number, point: Point) => void
   translatePlot: (plotId: string, dx: number, dy: number) => void
@@ -304,6 +336,18 @@ type MapState = {
 
   startDrawingRoad: () => void
   finishDrawingRoad: () => void
+
+  startDrawingFacility: () => void
+  appendFacilityPoint: (p: Point) => void
+  closeFacilityRing: () => void
+  startFacilityHole: () => void
+  finishDrawingFacility: () => void
+  updateFacilityVertex: (
+    id: string,
+    ring: 'outer' | number,
+    vertexIndex: number,
+    point: Point,
+  ) => void
 }
 
 let plotCounter = 1
@@ -315,13 +359,26 @@ let unsubPlotRealtime: (() => void) | null = null
 
 function applyPlotStateRowToStore(row: PlotStateRow) {
   if (getPlotRealtimePreviewMode()) return
+  if (row.map_id !== useMapStore.getState().activeMapId) return
   useMapStore.setState((s) => ({
     map: mergePlotStateIntoMap(s.map, [row]),
   }))
 }
 
+function subscribePlotRealtimeForZone(mapId: MapZoneId) {
+  if (unsubPlotRealtime) {
+    unsubPlotRealtime()
+    unsubPlotRealtime = null
+  }
+  if (!isSupabaseConfigured()) return
+  unsubPlotRealtime = subscribePlotStateRealtime((row) => {
+    applyPlotStateRowToStore(row)
+  }, mapId)
+}
+
 export const useMapStore = create<MapState>((set, get) => ({
-  map: resolveInitialMap(),
+  activeMapId: 'default',
+  map: resolveInitialMap('default'),
   canUndo: false,
   canRedo: false,
   selectedPlotId: null,
@@ -335,6 +392,29 @@ export const useMapStore = create<MapState>((set, get) => ({
   viewport: { scale: 1, positionX: 0, positionY: 0 },
   selectedComponentKeys: [],
   previewMode: false,
+
+  setActiveMapId: (id) => {
+    const currentId = get().activeMapId
+    if (id === currentId) return
+
+    if (!isSupabaseConfigured()) {
+      writeStoredMap(mapWorkingStorageKey(currentId), get().map)
+    }
+
+    set({
+      activeMapId: id,
+      selectedPlotId: null,
+      plotSelectionOpensUnitModal: false,
+      hoveredPlotId: null,
+      selectedComponentKeys: [],
+      drawing: { mode: 'idle' },
+      previewMode: false,
+    })
+    setPlotRealtimePreviewMode(false)
+
+    void reloadMapFromServer(id, true)
+    subscribePlotRealtimeForZone(id)
+  },
 
   setPreviewMode: (on) => {
     setPlotRealtimePreviewMode(on)
@@ -443,12 +523,13 @@ export const useMapStore = create<MapState>((set, get) => ({
 
   resetToDemo: () => {
     void (async () => {
-      const seed = await fetchSeedMapFromPublic()
+      const mapId = get().activeMapId
+      const seed = await fetchSeedMapFromPublic(mapId)
       if (!seed) return
       const base = withInitializedZIndex(cloneMap(seed))
       let merged = base
       if (isSupabaseConfigured()) {
-        const bundle = await fetchRemoteMapBundle()
+        const bundle = await fetchRemoteMapBundle(mapId)
         if (!bundle.error) {
           merged = mergeDesignAndPlotStates(base, bundle.plotStates)
         }
@@ -480,9 +561,9 @@ export const useMapStore = create<MapState>((set, get) => ({
     void reloadMapFromServer()
   },
 
-  publishDesign: async () => publishDesignRemote(get().map),
+  publishDesign: async () => publishDesignRemote(get().map, get().activeMapId),
 
-  reseedPlotState: async () => reseedPlotStateRemote(get().map),
+  reseedPlotState: async () => reseedPlotStateRemote(get().map, get().activeMapId),
 
   syncPlotStatusesFromLegacyData: (blocks) => {
     const statusByPlotId = new Map<string, Plot['status']>()
@@ -514,6 +595,19 @@ export const useMapStore = create<MapState>((set, get) => ({
         plots: s.map.plots.map((p) => (p.id === id ? { ...p, ...patch } : p)),
       },
     })),
+
+  setBlockPlotsLabelFontSize: (blockId, size) =>
+    set((s) => {
+      const n = Math.min(64, Math.max(4, Math.round(size)))
+      return {
+        map: {
+          ...s.map,
+          plots: s.map.plots.map((p) =>
+            p.blockId === blockId ? { ...p, labelFontSize: n } : p,
+          ),
+        },
+      }
+    }),
 
   deletePlot: (id) =>
     set((s) => ({
@@ -764,7 +858,7 @@ export const useMapStore = create<MapState>((set, get) => ({
       return { drawing: { mode: 'road', points: [p] } }
     }),
 
-  cancelDrawing: () => set(() => ({ drawing: { mode: 'idle' } })),
+  cancelDrawing: () => set(() => ({ drawing: { mode: 'idle' }, editorTool: 'select' })),
 
   finishDrawingPlot: (status = 'available') => {
     const { drawing, map } = get()
@@ -807,6 +901,109 @@ export const useMapStore = create<MapState>((set, get) => ({
     set(() => ({
       map: { ...map, roads: [...map.roads, road] },
       drawing: { mode: 'idle' },
+    }))
+  },
+
+  startDrawingFacility: () =>
+    set(() => ({
+      editorTool: 'drawFacility',
+      drawing: { mode: 'facility', stage: 'outer', outer: [], holes: [], currentRing: [] },
+    })),
+
+  appendFacilityPoint: (p) => {
+    const { drawing, snapGrid } = get()
+    if (drawing.mode !== 'facility') return
+    let active = drawing
+    if (active.outer.length >= 3 && active.currentRing.length === 0 && active.stage === 'outer') {
+      active = { ...active, stage: 'hole' }
+    }
+    const snapped = snapGrid > 0 ? snapToGrid(p, snapGrid) : p
+    const ring = active.currentRing
+    if (ring.length >= 3) {
+      const first = ring[0]
+      const dx = snapped.x - first.x
+      const dy = snapped.y - first.y
+      if (dx * dx + dy * dy <= 64) {
+        if (active !== drawing) set(() => ({ drawing: active }))
+        get().closeFacilityRing()
+        return
+      }
+    }
+    set(() => ({
+      drawing: { ...active, currentRing: [...ring, snapped] },
+    }))
+  },
+
+  closeFacilityRing: () => {
+    const { drawing } = get()
+    if (drawing.mode !== 'facility' || drawing.currentRing.length < 3) return
+    const closed = [...drawing.currentRing]
+    if (drawing.stage === 'outer' && drawing.outer.length === 0) {
+      set(() => ({
+        drawing: { ...drawing, outer: closed, currentRing: [] },
+      }))
+      return
+    }
+    if (drawing.stage === 'hole') {
+      set(() => ({
+        drawing: { ...drawing, holes: [...drawing.holes, closed], currentRing: [] },
+      }))
+    }
+  },
+
+  startFacilityHole: () => {
+    const { drawing } = get()
+    if (drawing.mode !== 'facility' || drawing.outer.length < 3) return
+    set(() => ({
+      drawing: { ...drawing, stage: 'hole', currentRing: [] },
+    }))
+  },
+
+  finishDrawingFacility: () => {
+    const { drawing, map } = get()
+    if (drawing.mode !== 'facility' || drawing.outer.length < 3) {
+      set(() => ({ drawing: { mode: 'idle' }, editorTool: 'select' }))
+      return
+    }
+    const id = `facility-${Date.now()}`
+    const facility: Facility = {
+      id,
+      label: 'مرفق جديد',
+      kind: 'service',
+      polygon: drawing.outer,
+      holes: drawing.holes.length > 0 ? drawing.holes : undefined,
+    }
+    set(() => ({
+      map: { ...map, facilities: [...map.facilities, facility] },
+      drawing: { mode: 'idle' },
+      editorTool: 'select',
+      selectedComponentKeys: [`facility:${id}`],
+    }))
+  },
+
+  updateFacilityVertex: (id, ring, vertexIndex, point) => {
+    const { snapGrid } = get()
+    const snapped = snapGrid > 0 ? snapToGrid(point, snapGrid) : point
+    set((s) => ({
+      map: {
+        ...s.map,
+        facilities: s.map.facilities.map((f) => {
+          if (f.id !== id) return f
+          if (ring === 'outer') {
+            const next = [...f.polygon]
+            if (vertexIndex < 0 || vertexIndex >= next.length) return f
+            next[vertexIndex] = snapped
+            return { ...f, polygon: next }
+          }
+          const holes = f.holes ? f.holes.map((h) => [...h]) : []
+          if (typeof ring !== 'number' || ring < 0 || ring >= holes.length) return f
+          const hole = [...holes[ring]]
+          if (vertexIndex < 0 || vertexIndex >= hole.length) return f
+          hole[vertexIndex] = snapped
+          holes[ring] = hole
+          return { ...f, holes }
+        }),
+      },
     }))
   },
 }))
@@ -857,7 +1054,7 @@ useMapStore.setState({
 let lastMapSnapshot = cloneMap(useMapStore.getState().map)
 useMapStore.subscribe((state) => {
   if (!isSupabaseConfigured()) {
-    writeStoredMap(MAP_WORKING_STORAGE_KEY, state.map)
+    writeStoredMap(mapWorkingStorageKey(state.activeMapId), state.map)
   }
   if (historyPaused) return
   const changed = JSON.stringify(state.map) !== JSON.stringify(lastMapSnapshot)
@@ -872,10 +1069,18 @@ useMapStore.subscribe((state) => {
 })
 
 /** Reload merged map from cloud backend (or local default when cloud mode is off). Clears import preview. */
-export async function reloadMapFromServer(): Promise<void> {
+export async function reloadMapFromServer(mapId?: MapZoneId, preferWorking = false): Promise<void> {
+  const zoneId = mapId ?? useMapStore.getState().activeMapId
+
   if (!isSupabaseConfigured()) {
+    if (!cachedPublicMaps[zoneId]) {
+      const seed = await fetchSeedMapFromPublic(zoneId)
+      if (seed) {
+        cachedPublicMaps[zoneId] = withInitializedZIndex(cloneMap(seed))
+      }
+    }
     historyPaused = true
-    const m = resolveDefaultMap()
+    const m = preferWorking ? resolveLocalMap(zoneId) : resolveDefaultMap(zoneId)
     useMapStore.setState({
       map: m,
       canUndo: false,
@@ -895,7 +1100,7 @@ export async function reloadMapFromServer(): Promise<void> {
     return
   }
 
-  const bundle = await fetchRemoteMapBundle()
+  const bundle = await fetchRemoteMapBundle(zoneId)
   if (bundle.error) {
     console.warn('[map] reload:', bundle.error)
     return
@@ -903,14 +1108,14 @@ export async function reloadMapFromServer(): Promise<void> {
 
   let design = bundle.design
   if (!design) {
-    const seed = await fetchSeedMapFromPublic()
+    const seed = await fetchSeedMapFromPublic(zoneId)
     if (seed) {
       design = withInitializedZIndex(cloneMap(seed))
-      cachedPublicMap = cloneMap(design)
+      cachedPublicMaps[zoneId] = cloneMap(design)
     }
   } else {
     design = withInitializedZIndex(cloneMap(design))
-    cachedPublicMap = cloneMap(design)
+    cachedPublicMaps[zoneId] = cloneMap(design)
   }
 
   if (!design) return
@@ -946,16 +1151,18 @@ export async function bootstrapPublicMap(): Promise<void> {
         return
       }
       const data = (await res.json()) as MapData
-      cachedPublicMap = withInitializedZIndex(cloneMap(data))
+      cachedPublicMaps.default = withInitializedZIndex(cloneMap(data))
     } catch (e) {
       console.warn('[map] Failed to load initial map JSON from public folder:', e)
     }
 
-    const hasSaved = !!(readStoredMap(MAP_WORKING_STORAGE_KEY) || readStoredMap(MAP_DEFAULT_STORAGE_KEY))
-    if (hasSaved || !cachedPublicMap) return
+    const hasSaved = !!(
+      readStoredMapForZone('default', 'working') || readStoredMapForZone('default', 'default')
+    )
+    if (hasSaved || !cachedPublicMaps.default) return
 
     historyPaused = true
-    const m = cloneMap(cachedPublicMap)
+    const m = cloneMap(cachedPublicMaps.default)
     useMapStore.setState({
       map: m,
       canUndo: false,
@@ -973,13 +1180,6 @@ export async function bootstrapPublicMap(): Promise<void> {
     return
   }
 
-  await reloadMapFromServer()
-
-  if (unsubPlotRealtime) {
-    unsubPlotRealtime()
-    unsubPlotRealtime = null
-  }
-  unsubPlotRealtime = subscribePlotStateRealtime((row) => {
-    applyPlotStateRowToStore(row)
-  })
+  await reloadMapFromServer('default')
+  subscribePlotRealtimeForZone('default')
 }

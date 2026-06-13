@@ -41,8 +41,8 @@ export type Block = {
   strokeColor?: string
   fillColor?: string
   /**
-   * Title strip thickness as a fraction of one unit row/column step (map space), typically 0.22–0.65.
-   * Omit for editor default (~0.4).
+   * Title strip thickness as a fraction of one unit row/column step (map space), 0–1.
+   * Omit for editor default (1 = 100% of one cell step).
    */
   labelStripDepthRatio?: number
 }
@@ -53,6 +53,8 @@ export type Facility = {
   id: string
   label: string
   polygon: Point[]
+  /** Optional inner rings (cutouts); each ring needs >= 3 points. */
+  holes?: Point[][]
   subLabel?: string
   /** Map-units px for the main title (default 9). */
   labelFontSize?: number
@@ -128,12 +130,25 @@ export type MapData = {
   componentZIndex?: Record<string, number>
 }
 
-export type EditorTool = 'select' | 'drawPlot' | 'drawRoad' | 'movePlot' | 'addLabel'
+export type EditorTool =
+  | 'select'
+  | 'drawPlot'
+  | 'drawRoad'
+  | 'drawFacility'
+  | 'movePlot'
+  | 'addLabel'
 
 export type DrawingState =
   | { mode: 'idle' }
   | { mode: 'plot'; points: Point[] }
   | { mode: 'road'; points: Point[] }
+  | {
+      mode: 'facility'
+      stage: 'outer' | 'hole'
+      outer: Point[]
+      holes: Point[][]
+      currentRing: Point[]
+    }
 
 export type VertexDragState = {
   plotId: string

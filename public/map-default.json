@@ -17149,7 +17149,7 @@
       ],
       "fillColor": "transparent",
       "strokeColor": "#ea580c",
-      "labelStripDepthRatio": 0.33
+      "labelStripDepthRatio": 1
     },
     {
       "id": "A4",
@@ -17202,7 +17202,7 @@
       ],
       "fillColor": "transparent",
       "strokeColor": "#ea580c",
-      "labelStripDepthRatio": 0.22
+      "labelStripDepthRatio": 1
     },
     {
       "id": "A2",
@@ -17671,7 +17671,7 @@
       ],
       "fillColor": "transparent",
       "strokeColor": "#ea580c",
-      "labelStripDepthRatio": 0.22
+      "labelStripDepthRatio": 1
     },
     {
       "id": "C10",
@@ -17698,7 +17698,7 @@
       ],
       "fillColor": "transparent",
       "strokeColor": "#ea580c",
-      "labelStripDepthRatio": 0.65
+      "labelStripDepthRatio": 1
     }
   ],
   "labels": [

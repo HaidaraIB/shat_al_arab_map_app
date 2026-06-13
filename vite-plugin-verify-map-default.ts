@@ -3,19 +3,22 @@ import path from 'node:path'
 import type { Plugin } from 'vite'
 
 /**
- * Vite copies `public/map-default.json` → `dist/map-default.json` (same folder as index.html).
- * This plugin warns if the expected output is missing after build.
+ * Vite copies `public/map-*.json` → `dist/map-*.json` (same folder as index.html).
+ * This plugin warns if expected map outputs are missing after build.
  */
 export function verifyMapDefaultCopied(): Plugin {
   return {
     name: 'verify-map-default-copied',
     closeBundle() {
       const root = path.resolve(process.cwd(), 'dist')
-      const mapJson = path.join(root, 'map-default.json')
-      if (!fs.existsSync(mapJson)) {
-        this.warn(
-          '[map-default] dist/map-default.json missing after build. Add public/map-default.json before npm run build.',
-        )
+      const requiredMaps = ['map-default.json', 'map-zone3.json']
+      for (const file of requiredMaps) {
+        const mapJson = path.join(root, file)
+        if (!fs.existsSync(mapJson)) {
+          this.warn(
+            `[map-default] dist/${file} missing after build. Add public/${file} before npm run build.`,
+          )
+        }
       }
     },
   }

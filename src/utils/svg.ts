@@ -10,6 +10,41 @@ export function pointsToSvgPath(points: Point[], closed: boolean): string {
   return closed ? `${d} Z` : d
 }
 
+/** Closed outer ring plus optional hole rings for SVG `fill-rule="evenodd"`. */
+export function polygonWithHolesToSvgPath(outer: Point[], holes: Point[][] = []): string {
+  const parts = [pointsToSvgPath(outer, true)]
+  for (const hole of holes) {
+    if (hole.length >= 3) parts.push(pointsToSvgPath(hole, true))
+  }
+  return parts.join(' ')
+}
+
+export function isNearPoint(a: Point, b: Point, threshold = 8): boolean {
+  const dx = a.x - b.x
+  const dy = a.y - b.y
+  return dx * dx + dy * dy <= threshold * threshold
+}
+
+/** Inverse of `componentGroupTransform` pivot — map/SVG point → component-local point. */
+export function componentLocalFromSvgPoint(
+  world: Point,
+  pivot: Point,
+  t: ComponentTransform,
+): Point {
+  const { sx, sy } = resolvedComponentScale(t)
+  const rad = (-t.rotationDeg * Math.PI) / 180
+  const cos = Math.cos(rad)
+  const sin = Math.sin(rad)
+  const dx = world.x - t.x - pivot.x
+  const dy = world.y - t.y - pivot.y
+  const ux = dx / sx
+  const uy = dy / sy
+  return {
+    x: ux * cos - uy * sin + pivot.x,
+    y: ux * sin + uy * cos + pivot.y,
+  }
+}
+
 /** Screen pixel → SVG user coordinates (call on the root &lt;svg&gt; element). */
 export function screenToSvgPoint(svg: SVGSVGElement, clientX: number, clientY: number): Point {
   const pt = svg.createSVGPoint()
