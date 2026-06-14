@@ -9,6 +9,7 @@ import type {
   MapLabel,
   MapLayerVisibility,
   Plot,
+  PlotStatus,
   Point,
   Road,
 } from '../types/map'
@@ -37,7 +38,7 @@ import {
   subscribePlotStateRealtime,
 } from '../lib/mapRemote'
 import type { PlotStateRow } from '../utils/mapSupabaseSync'
-import { mergePlotStateIntoMap } from '../utils/mapSupabaseSync'
+import { mergePlotStateIntoMap, stripBookingMeta } from '../utils/mapSupabaseSync'
 
 /** After grid resize, recompute each plot polygon so cell size matches the block quad (fixes stretched/misaligned units). */
 function remapPlotsToBlockGrid(plots: Plot[], blockId: string, quad: Point[], rows: number, cols: number): Plot[] {
@@ -251,11 +252,13 @@ const defaultLayers: MapLayerVisibility = {
 
 type MapState = {
   activeMapId: MapZoneId
+  /** True while switching zones and loading map data for the new zone. */
+  zoneLoading: boolean
   map: MapData
   canUndo: boolean
   canRedo: boolean
-  selectedPlotId: string | null
-  /** When true, App may open the unit details modal for the current `selectedPlotId` (consumed in App). */
+  selectedPlotIds: string[]
+  /** When true, App may open the unit details modal for the sole selected plot (consumed in App). */
   plotSelectionOpensUnitModal: boolean
   hoveredPlotId: string | null
   editMode: boolean
@@ -288,6 +291,10 @@ type MapState = {
   setEditorTool: (t: EditorTool) => void
 
   selectPlot: (id: string | null, options?: { openUnitModal?: boolean }) => void
+  clickTogglePlot: (id: string) => void
+  selectPlotsOnly: (ids: string[], options?: { openUnitModal?: boolean }) => void
+  clearPlotSelection: () => void
+  selectPlotsInBlock: (blockId: string, plotIds: string[]) => void
   setHoveredPlot: (id: string | null) => void
 
   importMap: (data: MapData) => void
@@ -305,8 +312,11 @@ type MapState = {
 
   addPlot: (plot: Plot) => void
   updatePlot: (id: string, patch: Partial<Plot>) => void
+  updatePlots: (ids: string[], patch: Partial<Plot>) => void
   setBlockPlotsLabelFontSize: (blockId: string, size: number) => void
   deletePlot: (id: string) => void
+  deletePlots: (ids: string[]) => void
+  setPlotsStatus: (ids: string[], status: PlotStatus) => void
   updateVertex: (plotId: string, vertexIndex: number, point: Point) => void
   translatePlot: (plotId: string, dx: number, dy: number) => void
 
@@ -376,12 +386,15 @@ function subscribePlotRealtimeForZone(mapId: MapZoneId) {
   }, mapId)
 }
 
+let zoneSwitchGeneration = 0
+
 export const useMapStore = create<MapState>((set, get) => ({
   activeMapId: 'default',
+  zoneLoading: false,
   map: resolveInitialMap('default'),
   canUndo: false,
   canRedo: false,
-  selectedPlotId: null,
+  selectedPlotIds: [],
   plotSelectionOpensUnitModal: false,
   hoveredPlotId: null,
   editMode: false,
@@ -401,9 +414,12 @@ export const useMapStore = create<MapState>((set, get) => ({
       writeStoredMap(mapWorkingStorageKey(currentId), get().map)
     }
 
+    const gen = ++zoneSwitchGeneration
+
     set({
       activeMapId: id,
-      selectedPlotId: null,
+      zoneLoading: true,
+      selectedPlotIds: [],
       plotSelectionOpensUnitModal: false,
       hoveredPlotId: null,
       selectedComponentKeys: [],
@@ -412,7 +428,15 @@ export const useMapStore = create<MapState>((set, get) => ({
     })
     setPlotRealtimePreviewMode(false)
 
-    void reloadMapFromServer(id, true)
+    void (async () => {
+      try {
+        await reloadMapFromServer(id, true)
+      } finally {
+        if (gen === zoneSwitchGeneration) {
+          useMapStore.setState({ zoneLoading: false })
+        }
+      }
+    })()
     subscribePlotRealtimeForZone(id)
   },
 
@@ -434,10 +458,19 @@ export const useMapStore = create<MapState>((set, get) => ({
       const set = new Set(s.selectedComponentKeys)
       if (set.has(key)) set.delete(key)
       else set.add(key)
-      return { selectedComponentKeys: [...set] }
+      return {
+        selectedComponentKeys: [...set],
+        selectedPlotIds: [],
+        plotSelectionOpensUnitModal: false,
+      }
     }),
 
-  selectComponentsOnly: (keys) => set(() => ({ selectedComponentKeys: keys })),
+  selectComponentsOnly: (keys) =>
+    set(() => ({
+      selectedComponentKeys: keys,
+      selectedPlotIds: [],
+      plotSelectionOpensUnitModal: false,
+    })),
 
   clearComponentSelection: () => set(() => ({ selectedComponentKeys: [] })),
 
@@ -501,18 +534,49 @@ export const useMapStore = create<MapState>((set, get) => ({
 
   setEditorTool: (editorTool) => set(() => ({ editorTool, drawing: { mode: 'idle' } })),
 
-  selectPlot: (selectedPlotId, options) =>
+  selectPlot: (id, options) => {
+    get().selectPlotsOnly(id ? [id] : [], options)
+  },
+
+  clickTogglePlot: (id) =>
+    set((s) => {
+      const setIds = new Set(s.selectedPlotIds)
+      if (setIds.has(id)) setIds.delete(id)
+      else setIds.add(id)
+      return {
+        selectedPlotIds: [...setIds],
+        plotSelectionOpensUnitModal: false,
+        selectedComponentKeys: [],
+      }
+    }),
+
+  selectPlotsOnly: (ids, options) =>
     set(() => ({
-      selectedPlotId,
+      selectedPlotIds: ids,
       plotSelectionOpensUnitModal:
-        selectedPlotId !== null && (options?.openUnitModal ?? true),
+        ids.length === 1 && (options?.openUnitModal ?? true),
+      selectedComponentKeys: [],
     })),
+
+  clearPlotSelection: () =>
+    set(() => ({
+      selectedPlotIds: [],
+      plotSelectionOpensUnitModal: false,
+    })),
+
+  selectPlotsInBlock: (_blockId, plotIds) =>
+    set(() => ({
+      selectedPlotIds: plotIds,
+      plotSelectionOpensUnitModal: false,
+      selectedComponentKeys: [],
+    })),
+
   setHoveredPlot: (hoveredPlotId) => set(() => ({ hoveredPlotId })),
 
   importMap: (data) =>
     set(() => ({
       map: withInitializedZIndex(cloneMap(data)),
-      selectedPlotId: null,
+      selectedPlotIds: [],
       plotSelectionOpensUnitModal: false,
       hoveredPlotId: null,
       drawing: { mode: 'idle' },
@@ -537,7 +601,7 @@ export const useMapStore = create<MapState>((set, get) => ({
       historyPaused = true
       useMapStore.setState({
         map: merged,
-        selectedPlotId: null,
+        selectedPlotIds: [],
         plotSelectionOpensUnitModal: false,
         hoveredPlotId: null,
         drawing: { mode: 'idle' },
@@ -596,6 +660,17 @@ export const useMapStore = create<MapState>((set, get) => ({
       },
     })),
 
+  updatePlots: (ids, patch) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      return {
+        map: {
+          ...s.map,
+          plots: s.map.plots.map((p) => (idSet.has(p.id) ? { ...p, ...patch } : p)),
+        },
+      }
+    }),
+
   setBlockPlotsLabelFontSize: (blockId, size) =>
     set((s) => {
       const n = Math.min(64, Math.max(4, Math.round(size)))
@@ -609,16 +684,67 @@ export const useMapStore = create<MapState>((set, get) => ({
       }
     }),
 
-  deletePlot: (id) =>
-    set((s) => ({
-      map: {
-        ...s.map,
-        plots: s.map.plots.filter((p) => p.id !== id),
-      },
-      selectedPlotId: s.selectedPlotId === id ? null : s.selectedPlotId,
-      plotSelectionOpensUnitModal:
-        s.selectedPlotId === id ? false : s.plotSelectionOpensUnitModal,
-    })),
+  deletePlot: (id) => {
+    get().deletePlots([id])
+  },
+
+  deletePlots: (ids) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      return {
+        map: {
+          ...s.map,
+          plots: s.map.plots.filter((p) => !idSet.has(p.id)),
+        },
+        selectedPlotIds: s.selectedPlotIds.filter((pid) => !idSet.has(pid)),
+        plotSelectionOpensUnitModal:
+          s.selectedPlotIds.some((pid) => idSet.has(pid))
+            ? false
+            : s.plotSelectionOpensUnitModal,
+      }
+    }),
+
+  setPlotsStatus: (ids, status) =>
+    set((s) => {
+      const idSet = new Set(ids)
+      const now = new Date().toISOString()
+      return {
+        map: {
+          ...s.map,
+          plots: s.map.plots.map((p) => {
+            if (!idSet.has(p.id)) return p
+            if (status === 'available') {
+              const meta = stripBookingMeta(p.meta as Record<string, unknown> | undefined)
+              return {
+                ...p,
+                status,
+                meta: Object.keys(meta).length ? meta : undefined,
+              }
+            }
+            if (status === 'reserved') {
+              return {
+                ...p,
+                status,
+                meta: {
+                  ...(p.meta ?? {}),
+                  reservedAt: now,
+                  reservedUntil: undefined,
+                  customerName: undefined,
+                  note: undefined,
+                },
+              }
+            }
+            return {
+              ...p,
+              status,
+              meta: {
+                ...stripBookingMeta(p.meta as Record<string, unknown> | undefined),
+              },
+            }
+          }),
+        },
+      }
+    }),
 
   updateVertex: (plotId, vertexIndex, point) =>
     set((s) => ({
@@ -879,7 +1005,7 @@ export const useMapStore = create<MapState>((set, get) => ({
     set(() => ({
       map: { ...map, plots: [...map.plots, plot] },
       drawing: { mode: 'idle' },
-      selectedPlotId: id,
+      selectedPlotIds: [id],
       plotSelectionOpensUnitModal: false,
     }))
   },
@@ -1021,7 +1147,7 @@ useMapStore.setState({
       canUndo: undoStack.length > 0,
       canRedo: redoStack.length > 0,
       selectedComponentKeys: [],
-      selectedPlotId: null,
+      selectedPlotIds: [],
       plotSelectionOpensUnitModal: false,
       hoveredPlotId: null,
       drawing: { mode: 'idle' },
@@ -1041,7 +1167,7 @@ useMapStore.setState({
       canUndo: undoStack.length > 0,
       canRedo: redoStack.length > 0,
       selectedComponentKeys: [],
-      selectedPlotId: null,
+      selectedPlotIds: [],
       plotSelectionOpensUnitModal: false,
       hoveredPlotId: null,
       drawing: { mode: 'idle' },
@@ -1085,7 +1211,7 @@ export async function reloadMapFromServer(mapId?: MapZoneId, preferWorking = fal
       map: m,
       canUndo: false,
       canRedo: false,
-      selectedPlotId: null,
+      selectedPlotIds: [],
       plotSelectionOpensUnitModal: false,
       hoveredPlotId: null,
       selectedComponentKeys: [],
@@ -1127,7 +1253,7 @@ export async function reloadMapFromServer(mapId?: MapZoneId, preferWorking = fal
     map: merged,
     canUndo: false,
     canRedo: false,
-    selectedPlotId: null,
+    selectedPlotIds: [],
     plotSelectionOpensUnitModal: false,
     hoveredPlotId: null,
     selectedComponentKeys: [],
@@ -1167,7 +1293,7 @@ export async function bootstrapPublicMap(): Promise<void> {
       map: m,
       canUndo: false,
       canRedo: false,
-      selectedPlotId: null,
+      selectedPlotIds: [],
       plotSelectionOpensUnitModal: false,
       hoveredPlotId: null,
       selectedComponentKeys: [],

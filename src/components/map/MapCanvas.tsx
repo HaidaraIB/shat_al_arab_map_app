@@ -1,21 +1,35 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { TransformComponent, TransformWrapper, type ReactZoomPanPinchRef } from 'react-zoom-pan-pinch'
 import { useMapStore } from '../../store/mapStore'
-import type { Block, ComponentTransform, DrawingState, Facility, MapData, MapLabel, Plot, Road } from '../../types/map'
+import type { Block, BlockLabelHeaderIntersectionStyle, BlockLabelHeaderPlacement, ComponentTransform, DrawingState, Facility, MapData, MapLabel, Plot, PlotStatus, Road } from '../../types/map'
 import { defaultComponentTransform } from '../../types/map'
 import {
+  blockLabelGridIntersectionLayout,
   blockLabelStripLayout,
   blockLabelStripTextAnchor,
   BLOCK_GRID_DIM_MAX,
   BLOCK_GRID_DIM_MIN,
+  clampToolbarGridIntersectionLines,
+  LABEL_HEADER_CIRCLE_RADIUS_MAP_MAX,
+  LABEL_HEADER_CIRCLE_RADIUS_MAP_MIN,
   LABEL_STRIP_RATIO_DEFAULT,
   labelStripDepthScale,
+  normalizeLabelHeaderCircleRadiusMapUnits,
+  normalizeLabelHeaderIntersectionStyle,
+  normalizeLabelHeaderPlacement,
   normalizeLabelStripRatio,
   plotCellPolygonFromGridQuad,
   polygonBounds,
   polygonCentroid,
   pointsBoundingBox,
 } from '../../utils/geometry'
+import {
+  isCBlock,
+  toolbarCellToInternal,
+  toolbarGridDimensions,
+  toolbarGridToInternal,
+  toolbarInternalGridLineRange,
+} from '../../utils/blockToolbarGrid'
 import {
   componentGroupTransform,
   componentLocalFromSvgPoint,
@@ -28,7 +42,6 @@ import {
 } from '../../utils/svg'
 import { mapContentSheetSize } from '../../utils/mapContentSheet'
 import { categoryForNewPlotInBlock, effectiveBlockLabel } from '../../utils/legacyBlocksFromMap'
-import { isCBlock, toolbarCellToInternal, toolbarGridDimensions, toolbarGridToInternal } from '../../utils/blockToolbarGrid'
 import { Label } from './Label'
 import { PlotPolygon } from './PlotPolygon'
 import { RoadPath } from './RoadPath'
@@ -36,6 +49,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { Toolbar } from './Toolbar'
 import { VertexHandle } from './VertexHandle'
 import { useAuth } from '../../lib/auth'
+import { upsertPlotStatesFromPlots } from '../../lib/mapRemote'
 import { reloadMapFromServer } from '../../store/mapStore'
 import { useToast } from '../ui/Toast'
 
@@ -180,11 +194,47 @@ type BlockMarkerLayout =
       fs: number
       stripDepth: number
     }
+  | {
+      mode: 'intersection'
+      cx: number
+      cy: number
+      label: string
+      fs: number
+      style: BlockLabelHeaderIntersectionStyle
+      circleRadius: number
+      hitRadius: number
+    }
 
-/** Label band like an extra unit row (or column): along first row if vertical grid, else along first column. */
+/** Label band like an extra unit row (or column), or a circle at a grid intersection. */
 function blockMarkerLayout(block: Block, marker: MapLabel): BlockMarkerLayout {
   const label = marker.text || block.label
   const fs = marker.fontSize ?? 13
+
+  if (normalizeLabelHeaderPlacement(block.labelHeaderPlacement) === 'grid-intersection') {
+    const intersection = blockLabelGridIntersectionLayout(block, {
+      toolbarRowLine: block.labelHeaderGridRowLine,
+      toolbarColLine: block.labelHeaderGridColLine,
+    })
+    if (intersection) {
+      const style = normalizeLabelHeaderIntersectionStyle(block.labelHeaderIntersectionStyle)
+      const circleRadius = normalizeLabelHeaderCircleRadiusMapUnits(block)
+      const hitRadius =
+        style === 'circle'
+          ? circleRadius + 4
+          : Math.max(10, fs * (0.35 + label.length * 0.12))
+      return {
+        mode: 'intersection',
+        cx: intersection.cx,
+        cy: intersection.cy,
+        label,
+        fs,
+        style,
+        circleRadius,
+        hitRadius,
+      }
+    }
+  }
+
   const ratio = normalizeLabelStripRatio(block.labelStripDepthRatio)
   const strip =
     ratio > 0 ? blockLabelStripLayout(block, { stripDepthRatio: ratio }) : null
@@ -257,7 +307,12 @@ function blockTableBounds(b: Block, plots: Plot[], marker: MapLabel | undefined)
   for (const p of plots) extend(p.polygon)
   if (marker) {
     const lay = blockMarkerLayout(b, marker)
-    if (lay.mode === 'quad') {
+    if (lay.mode === 'intersection') {
+      minX = Math.min(minX, lay.cx - lay.hitRadius)
+      maxX = Math.max(maxX, lay.cx + lay.hitRadius)
+      minY = Math.min(minY, lay.cy - lay.hitRadius)
+      maxY = Math.max(maxY, lay.cy + lay.hitRadius)
+    } else if (lay.mode === 'quad') {
       for (const p of lay.corners) {
         minX = Math.min(minX, p.x)
         minY = Math.min(minY, p.y)
@@ -375,7 +430,8 @@ export function MapCanvas() {
   const meta = map.meta
   const layers = useMapStore((s) => s.layers)
   const selectedKeys = useMapStore((s) => s.selectedComponentKeys)
-  const selectedPlotId = useMapStore((s) => s.selectedPlotId)
+  const selectedPlotIds = useMapStore((s) => s.selectedPlotIds)
+  const selectedPlotIdSet = useMemo(() => new Set(selectedPlotIds), [selectedPlotIds])
   const hoveredPlotId = useMapStore((s) => s.hoveredPlotId)
   const canUndo = useMapStore((s) => s.canUndo)
   const canRedo = useMapStore((s) => s.canRedo)
@@ -385,7 +441,10 @@ export function MapCanvas() {
   const redo = useMapStore((s) => s.redo)
   const clickToggleComponent = useMapStore((s) => s.clickToggleComponent)
   const clearComponentSelection = useMapStore((s) => s.clearComponentSelection)
-  const selectPlot = useMapStore((s) => s.selectPlot)
+  const clickTogglePlot = useMapStore((s) => s.clickTogglePlot)
+  const selectPlotsOnly = useMapStore((s) => s.selectPlotsOnly)
+  const clearPlotSelection = useMapStore((s) => s.clearPlotSelection)
+  const selectPlotsInBlock = useMapStore((s) => s.selectPlotsInBlock)
   const setHoveredPlot = useMapStore((s) => s.setHoveredPlot)
   const patchSelectedTransforms = useMapStore((s) => s.patchSelectedTransforms)
   const setSelectedZIndex = useMapStore((s) => s.setSelectedZIndex)
@@ -398,8 +457,11 @@ export function MapCanvas() {
   const reseedPlotState = useMapStore((s) => s.reseedPlotState)
   const addPlot = useMapStore((s) => s.addPlot)
   const updatePlot = useMapStore((s) => s.updatePlot)
+  const updatePlots = useMapStore((s) => s.updatePlots)
   const setBlockPlotsLabelFontSize = useMapStore((s) => s.setBlockPlotsLabelFontSize)
   const deletePlot = useMapStore((s) => s.deletePlot)
+  const deletePlots = useMapStore((s) => s.deletePlots)
+  const setPlotsStatus = useMapStore((s) => s.setPlotsStatus)
   const addRoad = useMapStore((s) => s.addRoad)
   const addBlock = useMapStore((s) => s.addBlock)
   const setBlockGrid = useMapStore((s) => s.setBlockGrid)
@@ -475,8 +537,8 @@ export function MapCanvas() {
       }
       if (e.key === 'Delete') {
         e.preventDefault()
-        if (selectedPlotId) {
-          deletePlot(selectedPlotId)
+        if (selectedPlotIds.length > 0) {
+          deletePlots(selectedPlotIds)
           return
         }
         deleteSelectedComponents()
@@ -498,7 +560,7 @@ export function MapCanvas() {
       window.removeEventListener('keyup', onKey)
       window.removeEventListener('blur', onBlur)
     }
-  }, [cancelDrawing, deletePlot, deleteSelectedComponents, redo, selectedPlotId, undo])
+  }, [cancelDrawing, deletePlots, deleteSelectedComponents, redo, selectedPlotIds, undo])
 
   /** While Ctrl/Meta is held, infra hit targets exclude pan/zoom so component selection/drag stays usable. */
   const [mapTransformBlockInfra, setMapTransformBlockInfra] = useState(false)
@@ -551,10 +613,10 @@ export function MapCanvas() {
     (e: React.MouseEvent, key: string) => {
       e.preventDefault()
       e.stopPropagation()
-      selectPlot(null)
+      clearPlotSelection()
       selectComponentsOnly([key])
     },
-    [selectComponentsOnly, selectPlot],
+    [clearPlotSelection, selectComponentsOnly],
   )
 
   const startComponentDrag = useCallback(
@@ -648,13 +710,12 @@ export function MapCanvas() {
       // Second click of a double-click is ignored here; double-click selects the parent block instead.
       if (e.detail >= 2) return
       if (e.ctrlKey || e.metaKey) {
-        clearComponentSelection()
-        selectPlot(plot.id, { openUnitModal: false })
+        clickTogglePlot(plot.id)
         return
       }
-      selectPlot(plot.id)
+      selectPlotsOnly([plot.id])
     },
-    [clearComponentSelection, plotInteractiveForUser, selectPlot],
+    [clickTogglePlot, plotInteractiveForUser, selectPlotsOnly],
   )
 
   const handlePlotDoubleClick = useCallback(
@@ -662,12 +723,31 @@ export function MapCanvas() {
       e.preventDefault()
       e.stopPropagation()
       if (!plotInteractiveForUser(plot)) return
-      selectPlot(null)
+      clearPlotSelection()
       if (map.blocks.some((bl) => bl.id === plot.blockId)) {
         selectComponentsOnly([blockKey(plot.blockId)])
       }
     },
-    [map.blocks, plotInteractiveForUser, selectComponentsOnly, selectPlot],
+    [clearPlotSelection, map.blocks, plotInteractiveForUser, selectComponentsOnly],
+  )
+
+  const handleBlockIntersectionHeaderPointerDown = useCallback(
+    (e: React.PointerEvent, key: string) => {
+      e.stopPropagation()
+      if (e.detail >= 2) return
+      clearPlotSelection()
+      if (e.ctrlKey || e.metaKey) {
+        clickToggleComponent(key)
+        return
+      }
+      const alreadySelected = useMapStore.getState().selectedComponentKeys.includes(key)
+      if (!alreadySelected) {
+        selectComponentsOnly([key])
+        return
+      }
+      startComponentDrag(e, key)
+    },
+    [clickToggleComponent, clearPlotSelection, selectComponentsOnly, startComponentDrag],
   )
 
   const fitView = useCallback(() => {
@@ -1043,10 +1123,11 @@ export function MapCanvas() {
         )}
         {layers.blockMarkers && marker && (() => {
           const lay = blockMarkerLayout(b, marker)
+          if (lay.mode === 'intersection') return null
           const vs = Math.max(0.04, viewportScale)
-          const depth = lay.stripDepth
           const userMapFs = marker.fontSize ?? 13
           const fs = Math.max(5, userMapFs / vs)
+          const depth = lay.stripDepth
           const tx =
             lay.mode === 'quad' ? lay.cx + lay.nx * (depth * 0.12) : lay.cx
           const ty =
@@ -1104,7 +1185,7 @@ export function MapCanvas() {
               interactive={plotInteractiveForUser(plot)}
               adminView={isAdmin}
               hovered={hoveredPlotId === plot.id}
-              selected={selectedPlotId === plot.id}
+              selected={selectedPlotIdSet.has(plot.id)}
               inverseScaleX={sx}
               inverseScaleY={sy}
               viewportScale={viewportScale}
@@ -1115,6 +1196,63 @@ export function MapCanvas() {
               onDoubleClick={(e) => handlePlotDoubleClick(plot, e)}
             />
           ))}
+        {layers.blockMarkers && marker && (() => {
+          const lay = blockMarkerLayout(b, marker)
+          if (lay.mode !== 'intersection') return null
+          const vs = Math.max(0.04, viewportScale)
+          const tx = lay.cx
+          const ty = lay.cy
+          const screenFs = Math.max(6, lay.fs / vs)
+          const counterRot =
+            Math.abs(t.rotationDeg) > 0.08 ? `rotate(${-t.rotationDeg}, ${tx}, ${ty})` : undefined
+          const scaleUndo = undoComponentScaleAt(tx, ty, sx, sy)
+          return (
+            <g
+              className={`map-infra-select ${isTransformMode ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'}`}
+            >
+              <g transform={scaleUndo}>
+                <circle
+                  cx={tx}
+                  cy={ty}
+                  r={lay.hitRadius}
+                  fill="transparent"
+                  className="map-infra-hit"
+                  onPointerDown={(e) => handleBlockIntersectionHeaderPointerDown(e, key)}
+                  onDoubleClick={(e) => selectComponentExclusive(e, key)}
+                  onPointerEnter={() => setHoveredPlot(null)}
+                  onPointerLeave={() => setHoveredPlot(null)}
+                />
+                {lay.style === 'circle' && (
+                  <circle
+                    cx={tx}
+                    cy={ty}
+                    r={lay.circleRadius}
+                    fill="#ffffff"
+                    stroke="#0f172a"
+                    strokeWidth={2}
+                    className="pointer-events-none"
+                  />
+                )}
+                <g transform={counterRot} className="pointer-events-none">
+                  <text
+                    x={tx}
+                    y={ty}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    className="select-none fill-slate-900 font-black [text-rendering:geometricPrecision]"
+                    style={{
+                      fontSize: screenFs,
+                      fontWeight: marker.fontWeight ?? '900',
+                      letterSpacing: '0.02em',
+                    }}
+                  >
+                    {lay.label}
+                  </text>
+                </g>
+              </g>
+            </g>
+          )
+        })()}
         {sel && (
           <polygon
             points={pointsToSvgPoints(b.polygon)}
@@ -1306,7 +1444,7 @@ export function MapCanvas() {
       const mod = e.ctrlKey || e.metaKey
       if (!mod) {
         clearComponentSelection()
-        selectPlot(null)
+        clearPlotSelection()
         return
       }
 
@@ -1353,20 +1491,20 @@ export function MapCanvas() {
 
         if (dragW < 4 || dragH < 4) {
           clearComponentSelection()
-          selectPlot(null)
+          clearPlotSelection()
           return
         }
 
         const keys = [...new Set(collectKeysInMarquee(n))] as string[]
         selectComponentsOnly(keys)
-        selectPlot(null)
+        clearPlotSelection()
       }
 
       window.addEventListener('pointermove', onMove)
       window.addEventListener('pointerup', onEnd)
       window.addEventListener('pointercancel', onEnd)
     },
-    [clearComponentSelection, collectKeysInMarquee, selectComponentsOnly, selectPlot],
+    [clearComponentSelection, clearPlotSelection, collectKeysInMarquee, selectComponentsOnly],
   )
 
   const renderFacilityDrawingPreview = (draw: Extract<DrawingState, { mode: 'facility' }>) => {
@@ -1452,6 +1590,8 @@ export function MapCanvas() {
     return nodes
   }, [
     ct,
+    handleBlockIntersectionHeaderPointerDown,
+    handlePlotClick,
     handlePlotDoubleClick,
     hoveredPlotId,
     isTransformMode,
@@ -1463,15 +1603,19 @@ export function MapCanvas() {
     renderRoad,
     selectComponentExclusive,
     selectedKeys,
-    selectedPlotId,
+    selectedPlotIdSet,
+    setHoveredPlot,
     startComponentDrag,
     viewportScale,
   ])
 
   const primarySelectedKey = selectedKeys[0] ?? null
+  const selectedPlotCount = selectedPlotIds.length
+  const primarySelectedPlotId = selectedPlotIds[0] ?? null
+
   const selectedTypeLabel = useMemo(() => {
-    /** Plot/cell selection uses `selectedPlotId`, not `selectedComponentKeys` — same as font size / cell tools. */
-    if (selectedPlotId) return 'خلية'
+    if (selectedPlotCount > 1) return `${selectedPlotCount} خلايا`
+    if (selectedPlotCount === 1) return 'خلية'
     if (!primarySelectedKey) return undefined
     if (primarySelectedKey.startsWith('road:')) return 'شارع'
     if (primarySelectedKey.startsWith('block:')) return 'بلوك'
@@ -1479,7 +1623,7 @@ export function MapCanvas() {
     if (primarySelectedKey.startsWith('facility-label:')) return 'تسمية مرفق'
     if (primarySelectedKey.startsWith('label:')) return 'نص'
     return 'عنصر'
-  }, [primarySelectedKey, selectedPlotId])
+  }, [primarySelectedKey, selectedPlotCount])
 
   const editableLabelText = useMemo(() => {
     if (!primarySelectedKey) return null
@@ -1503,8 +1647,8 @@ export function MapCanvas() {
   }, [map.facilities, map.labels, primarySelectedKey])
 
   const selectionFontSize = useMemo(() => {
-    if (selectedPlotId) {
-      const p = map.plots.find((q) => q.id === selectedPlotId)
+    if (selectedPlotCount > 0) {
+      const p = map.plots.find((q) => q.id === primarySelectedPlotId)
       if (!p) return null
       return p.labelFontSize ?? 9
     }
@@ -1529,39 +1673,11 @@ export function MapCanvas() {
       return f?.labelFontSize ?? 9
     }
     return null
-  }, [map.facilities, map.labels, map.plots, primarySelectedKey, selectedPlotId])
-
-  const selectionSubLabelFontSize = useMemo(() => {
-    if (selectedPlotId) return null
-    if (!primarySelectedKey) return null
-    if (!primarySelectedKey.startsWith('facility-label:') && !primarySelectedKey.startsWith('facility:')) return null
-    const fid = primarySelectedKey.startsWith('facility-label:')
-      ? primarySelectedKey.slice(15)
-      : primarySelectedKey.slice(9)
-    const f = map.facilities.find((x) => x.id === fid)
-    if (!f) return null
-    return f.subLabelFontSize ?? 7
-  }, [map.facilities, primarySelectedKey, selectedPlotId])
+  }, [map.facilities, map.labels, map.plots, primarySelectedKey, primarySelectedPlotId, selectedPlotCount])
 
   const selectedBlockIdForToolbar = primarySelectedKey?.startsWith('block:')
     ? primarySelectedKey.replace('block:', '')
     : null
-
-  const selectedBlockLabelStripPercent = useMemo(() => {
-    if (!selectedBlockIdForToolbar) return null
-    const bl = map.blocks.find((b) => b.id === selectedBlockIdForToolbar)
-    if (!bl) return null
-    return Math.round(normalizeLabelStripRatio(bl.labelStripDepthRatio) * 100)
-  }, [map.blocks, selectedBlockIdForToolbar])
-
-  const handleSetBlockLabelStripPercent = useCallback(
-    (pct: number) => {
-      if (!selectedBlockIdForToolbar) return
-      const ratio = normalizeLabelStripRatio(pct / 100)
-      patchBlock(selectedBlockIdForToolbar, { labelStripDepthRatio: ratio })
-    },
-    [patchBlock, selectedBlockIdForToolbar],
-  )
 
   const selectedBlockForToolbar = useMemo(
     () =>
@@ -1582,6 +1698,146 @@ export function MapCanvas() {
       minCols: Math.max(BLOCK_GRID_DIM_MIN, stats.occupiedCols),
     }
   }, [map.plots, selectedBlockForToolbar])
+
+  const selectedBlockLabelStripPercent = useMemo(() => {
+    if (!selectedBlockIdForToolbar) return null
+    const bl = map.blocks.find((b) => b.id === selectedBlockIdForToolbar)
+    if (!bl) return null
+    return Math.round(normalizeLabelStripRatio(bl.labelStripDepthRatio) * 100)
+  }, [map.blocks, selectedBlockIdForToolbar])
+
+  const handleSetBlockLabelStripPercent = useCallback(
+    (pct: number) => {
+      if (!selectedBlockIdForToolbar) return
+      const ratio = normalizeLabelStripRatio(pct / 100)
+      patchBlock(selectedBlockIdForToolbar, { labelStripDepthRatio: ratio })
+    },
+    [patchBlock, selectedBlockIdForToolbar],
+  )
+
+  const selectedBlockLabelHeaderPlacement = useMemo((): BlockLabelHeaderPlacement | null => {
+    if (!selectedBlockIdForToolbar) return null
+    const bl = map.blocks.find((b) => b.id === selectedBlockIdForToolbar)
+    if (!bl) return null
+    return normalizeLabelHeaderPlacement(bl.labelHeaderPlacement)
+  }, [map.blocks, selectedBlockIdForToolbar])
+
+  const selectedBlockLabelHeaderGridLines = useMemo(() => {
+    if (!selectedBlockForToolbar || !selectedBlockToolbarGrid) return null
+    const clamped = clampToolbarGridIntersectionLines(
+      selectedBlockForToolbar,
+      selectedBlockForToolbar.labelHeaderGridRowLine,
+      selectedBlockForToolbar.labelHeaderGridColLine,
+    )
+    const rowRange = toolbarInternalGridLineRange(selectedBlockToolbarGrid.rows)
+    const colRange = toolbarInternalGridLineRange(selectedBlockToolbarGrid.cols)
+    return {
+      rowLine: clamped.rowLine,
+      colLine: clamped.colLine,
+      minRowLine: rowRange.min,
+      maxRowLine: rowRange.max,
+      minColLine: colRange.min,
+      maxColLine: colRange.max,
+    }
+  }, [selectedBlockForToolbar, selectedBlockToolbarGrid])
+
+  const selectedBlockLabelHeaderIntersectionStyle = useMemo((): BlockLabelHeaderIntersectionStyle | null => {
+    if (!selectedBlockIdForToolbar) return null
+    const bl = map.blocks.find((b) => b.id === selectedBlockIdForToolbar)
+    if (!bl) return null
+    return normalizeLabelHeaderIntersectionStyle(bl.labelHeaderIntersectionStyle)
+  }, [map.blocks, selectedBlockIdForToolbar])
+
+  const selectedBlockLabelHeaderCircleRadiusMapUnits = useMemo(() => {
+    if (!selectedBlockIdForToolbar) return null
+    const bl = map.blocks.find((b) => b.id === selectedBlockIdForToolbar)
+    if (!bl) return null
+    return Math.round(normalizeLabelHeaderCircleRadiusMapUnits(bl))
+  }, [map.blocks, selectedBlockIdForToolbar])
+
+  const handleSetBlockLabelHeaderPlacement = useCallback(
+    (placement: BlockLabelHeaderPlacement) => {
+      if (!selectedBlockIdForToolbar || !selectedBlockForToolbar) return
+      if (placement === 'grid-intersection') {
+        const clamped = clampToolbarGridIntersectionLines(
+          selectedBlockForToolbar,
+          selectedBlockForToolbar.labelHeaderGridRowLine,
+          selectedBlockForToolbar.labelHeaderGridColLine,
+        )
+        patchBlock(selectedBlockIdForToolbar, {
+          labelHeaderPlacement: placement,
+          labelHeaderGridRowLine: clamped.rowLine,
+          labelHeaderGridColLine: clamped.colLine,
+          labelHeaderIntersectionStyle: normalizeLabelHeaderIntersectionStyle(
+            selectedBlockForToolbar.labelHeaderIntersectionStyle,
+          ),
+          labelHeaderCircleRadiusMapUnits: normalizeLabelHeaderCircleRadiusMapUnits(
+            selectedBlockForToolbar,
+          ),
+        })
+        return
+      }
+      patchBlock(selectedBlockIdForToolbar, { labelHeaderPlacement: placement })
+    },
+    [patchBlock, selectedBlockForToolbar, selectedBlockIdForToolbar],
+  )
+
+  const handleSetBlockLabelHeaderRowLine = useCallback(
+    (rowLine: number) => {
+      if (!selectedBlockIdForToolbar || !selectedBlockForToolbar) return
+      const clamped = clampToolbarGridIntersectionLines(
+        selectedBlockForToolbar,
+        rowLine,
+        selectedBlockForToolbar.labelHeaderGridColLine,
+      )
+      patchBlock(selectedBlockIdForToolbar, {
+        labelHeaderGridRowLine: clamped.rowLine,
+        labelHeaderGridColLine: clamped.colLine,
+      })
+    },
+    [patchBlock, selectedBlockForToolbar, selectedBlockIdForToolbar],
+  )
+
+  const handleSetBlockLabelHeaderColLine = useCallback(
+    (colLine: number) => {
+      if (!selectedBlockIdForToolbar || !selectedBlockForToolbar) return
+      const clamped = clampToolbarGridIntersectionLines(
+        selectedBlockForToolbar,
+        selectedBlockForToolbar.labelHeaderGridRowLine,
+        colLine,
+      )
+      patchBlock(selectedBlockIdForToolbar, {
+        labelHeaderGridRowLine: clamped.rowLine,
+        labelHeaderGridColLine: clamped.colLine,
+      })
+    },
+    [patchBlock, selectedBlockForToolbar, selectedBlockIdForToolbar],
+  )
+
+  const handleSetBlockLabelHeaderIntersectionStyle = useCallback(
+    (style: BlockLabelHeaderIntersectionStyle) => {
+      if (!selectedBlockIdForToolbar) return
+      patchBlock(selectedBlockIdForToolbar, {
+        labelHeaderIntersectionStyle: style,
+        labelHeaderCircleRadiusMapUnits: normalizeLabelHeaderCircleRadiusMapUnits(
+          selectedBlockForToolbar ?? undefined,
+        ),
+      })
+    },
+    [patchBlock, selectedBlockForToolbar, selectedBlockIdForToolbar],
+  )
+
+  const handleSetBlockLabelHeaderCircleRadiusMapUnits = useCallback(
+    (radius: number) => {
+      if (!selectedBlockIdForToolbar) return
+      const clamped = Math.max(
+        LABEL_HEADER_CIRCLE_RADIUS_MAP_MIN,
+        Math.min(LABEL_HEADER_CIRCLE_RADIUS_MAP_MAX, Math.round(radius)),
+      )
+      patchBlock(selectedBlockIdForToolbar, { labelHeaderCircleRadiusMapUnits: clamped })
+    },
+    [patchBlock, selectedBlockIdForToolbar],
+  )
 
   const handleSetBlockToolbarGrid = useCallback(
     (toolbarRows: number, toolbarCols: number) => {
@@ -1615,10 +1871,30 @@ export function MapCanvas() {
         }
       }
       setBlockGrid(selectedBlockIdForToolbar, newRows, newCols)
+      if (
+        normalizeLabelHeaderPlacement(selectedBlockForToolbar.labelHeaderPlacement) ===
+        'grid-intersection'
+      ) {
+        const updatedBlock = {
+          ...selectedBlockForToolbar,
+          rows: newRows,
+          cols: newCols,
+        }
+        const clamped = clampToolbarGridIntersectionLines(
+          updatedBlock,
+          selectedBlockForToolbar.labelHeaderGridRowLine,
+          selectedBlockForToolbar.labelHeaderGridColLine,
+        )
+        patchBlock(selectedBlockIdForToolbar, {
+          labelHeaderGridRowLine: clamped.rowLine,
+          labelHeaderGridColLine: clamped.colLine,
+        })
+      }
     },
     [
       deletePlot,
       map.plots,
+      patchBlock,
       selectedBlockForToolbar,
       selectedBlockIdForToolbar,
       setBlockGrid,
@@ -1661,8 +1937,8 @@ export function MapCanvas() {
   const handleSetSelectionFontSize = useCallback(
     (raw: number) => {
       const n = Math.min(64, Math.max(4, Math.round(raw)))
-      if (selectedPlotId) {
-        updatePlot(selectedPlotId, { labelFontSize: n })
+      if (selectedPlotIds.length > 0) {
+        updatePlots(selectedPlotIds, { labelFontSize: n })
         return
       }
       for (const key of selectedKeys) {
@@ -1673,18 +1949,7 @@ export function MapCanvas() {
         else if (key.startsWith('facility:')) patchFacility(key.slice(9), { labelFontSize: n })
       }
     },
-    [patchFacility, patchMapLabel, selectedKeys, selectedPlotId, updatePlot],
-  )
-
-  const handleSetSubLabelFontSize = useCallback(
-    (raw: number) => {
-      const n = Math.min(48, Math.max(4, Math.round(raw)))
-      for (const key of selectedKeys) {
-        if (key.startsWith('facility-label:')) patchFacility(key.slice(15), { subLabelFontSize: n })
-        else if (key.startsWith('facility:')) patchFacility(key.slice(9), { subLabelFontSize: n })
-      }
-    },
-    [patchFacility, selectedKeys],
+    [patchFacility, patchMapLabel, selectedKeys, selectedPlotIds, updatePlots],
   )
 
   const makeId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
@@ -1894,8 +2159,11 @@ export function MapCanvas() {
   )
 
   const selectedPlot = useMemo(
-    () => (selectedPlotId ? map.plots.find((p) => p.id === selectedPlotId) ?? null : null),
-    [map.plots, selectedPlotId],
+    () =>
+      selectedPlotCount === 1 && primarySelectedPlotId
+        ? map.plots.find((p) => p.id === primarySelectedPlotId) ?? null
+        : null,
+    [map.plots, primarySelectedPlotId, selectedPlotCount],
   )
 
   /** Block component explicitly selected on the map — drives add-unit + grid toolbar sections (no dropdown). */
@@ -1906,18 +2174,50 @@ export function MapCanvas() {
 
   const updateSelectedPlotNumber = useCallback(
     (text: string) => {
-      if (!selectedPlotId || !text) return
-      updatePlot(selectedPlotId, { number: text })
+      if (!primarySelectedPlotId || !text) return
+      updatePlot(primarySelectedPlotId, { number: text })
       toast.success('تم تحديث رقم/اسم الخلية.')
     },
-    [selectedPlotId, updatePlot, toast],
+    [primarySelectedPlotId, updatePlot, toast],
   )
 
   const deleteSelectedPlotCell = useCallback(() => {
-    if (!selectedPlotId) return
-    deletePlot(selectedPlotId)
-    toast.success('تم حذف الخلية المحددة.')
-  }, [deletePlot, selectedPlotId, toast])
+    if (selectedPlotIds.length === 0) return
+    deletePlots(selectedPlotIds)
+    toast.success(
+      selectedPlotIds.length === 1
+        ? 'تم حذف الخلية المحددة.'
+        : `تم حذف ${selectedPlotIds.length} خلية.`,
+    )
+  }, [deletePlots, selectedPlotIds, toast])
+
+  const handleSelectAllPlotsInBlock = useCallback(() => {
+    if (!mapSelectedBlockId) return
+    const plots = (plotsByBlock.get(mapSelectedBlockId) ?? []).filter(plotInteractiveForUser)
+    if (plots.length === 0) {
+      toast.warning('لا توجد وحدات قابلة للتحديد في هذا البلوك.')
+      return
+    }
+    selectPlotsInBlock(
+      mapSelectedBlockId,
+      plots.map((p) => p.id),
+    )
+    toast.success(`تم تحديد ${plots.length} وحدة في البلوك.`)
+  }, [mapSelectedBlockId, plotInteractiveForUser, plotsByBlock, selectPlotsInBlock, toast])
+
+  const handleSetSelectedPlotsStatus = useCallback(
+    async (status: PlotStatus) => {
+      if (selectedPlotIds.length === 0) return
+      setPlotsStatus(selectedPlotIds, status)
+      const nextPlots = useMapStore
+        .getState()
+        .map.plots.filter((p) => selectedPlotIds.includes(p.id))
+      const { error } = await upsertPlotStatesFromPlots(nextPlots, activeMapId)
+      if (error) toast.error(`فشل مزامنة الحالة: ${error}`)
+      else toast.success(`تم تحديث حالة ${selectedPlotIds.length} وحدة.`)
+    },
+    [activeMapId, selectedPlotIds, setPlotsStatus, toast],
+  )
 
   const deleteBlockRow = useCallback(
     (blockId: string, rowNumber1: number) => {
@@ -2130,8 +2430,11 @@ export function MapCanvas() {
         onDeleteBlockRow={deleteBlockRowFromToolbar}
         onDeleteBlockCol={deleteBlockColFromToolbar}
         selectedPlotNumber={selectedPlot?.number ?? null}
+        selectedPlotCount={selectedPlotCount}
         onUpdateSelectedPlotNumber={updateSelectedPlotNumber}
         onDeleteSelectedPlot={deleteSelectedPlotCell}
+        onSelectAllPlotsInBlock={handleSelectAllPlotsInBlock}
+        onSetSelectedPlotsStatus={handleSetSelectedPlotsStatus}
         onAddRoad={addContextRoad}
         onAddBlock={addContextBlock}
         onAddFacility={addContextFacility}
@@ -2158,6 +2461,20 @@ export function MapCanvas() {
         onFitView={fitView}
         selectedBlockLabelStripPercent={selectedBlockLabelStripPercent}
         onSetBlockLabelStripPercent={handleSetBlockLabelStripPercent}
+        selectedBlockLabelHeaderPlacement={selectedBlockLabelHeaderPlacement}
+        onSetBlockLabelHeaderPlacement={handleSetBlockLabelHeaderPlacement}
+        selectedBlockLabelHeaderRowLine={selectedBlockLabelHeaderGridLines?.rowLine ?? null}
+        selectedBlockLabelHeaderColLine={selectedBlockLabelHeaderGridLines?.colLine ?? null}
+        minBlockLabelHeaderRowLine={selectedBlockLabelHeaderGridLines?.minRowLine ?? null}
+        maxBlockLabelHeaderRowLine={selectedBlockLabelHeaderGridLines?.maxRowLine ?? null}
+        minBlockLabelHeaderColLine={selectedBlockLabelHeaderGridLines?.minColLine ?? null}
+        maxBlockLabelHeaderColLine={selectedBlockLabelHeaderGridLines?.maxColLine ?? null}
+        onSetBlockLabelHeaderRowLine={handleSetBlockLabelHeaderRowLine}
+        onSetBlockLabelHeaderColLine={handleSetBlockLabelHeaderColLine}
+        selectedBlockLabelHeaderIntersectionStyle={selectedBlockLabelHeaderIntersectionStyle}
+        onSetBlockLabelHeaderIntersectionStyle={handleSetBlockLabelHeaderIntersectionStyle}
+        selectedBlockLabelHeaderCircleRadiusMapUnits={selectedBlockLabelHeaderCircleRadiusMapUnits}
+        onSetBlockLabelHeaderCircleRadiusMapUnits={handleSetBlockLabelHeaderCircleRadiusMapUnits}
         selectedBlockToolbarRows={selectedBlockToolbarGrid?.rows ?? null}
         selectedBlockToolbarCols={selectedBlockToolbarGrid?.cols ?? null}
         minBlockToolbarRows={selectedBlockToolbarGrid?.minRows ?? null}
@@ -2168,8 +2485,6 @@ export function MapCanvas() {
         onSetBlockPlotFontSize={handleSetBlockPlotFontSize}
         selectionFontSize={selectionFontSize}
         onSetSelectionFontSize={handleSetSelectionFontSize}
-        selectionSubLabelFontSize={selectionSubLabelFontSize}
-        onSetSubLabelFontSize={handleSetSubLabelFontSize}
       />
       <input
         ref={importInputRef}

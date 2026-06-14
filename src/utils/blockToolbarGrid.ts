@@ -42,3 +42,38 @@ export function toolbarCellToInternal(
   }
   return { row: tr - 1, col: tc - 1 }
 }
+
+/** Map toolbar 1-based internal grid-line indices to internal storage line indices (0..rows, 0..cols). */
+export function toolbarGridLineToInternal(
+  block: Block,
+  toolbarRowLine: number,
+  toolbarColLine: number,
+): { rowLine: number; colLine: number } {
+  const tr = Math.max(1, Math.floor(toolbarRowLine))
+  const tc = Math.max(1, Math.floor(toolbarColLine))
+  if (isCBlock(block.id)) {
+    return { rowLine: tc, colLine: tr }
+  }
+  return { rowLine: tr, colLine: tc }
+}
+
+/** Valid internal grid-line range for toolbar row/col sliders (1 .. dim − 1). */
+export function toolbarInternalGridLineRange(dim: number): { min: number; max: number } {
+  const d = Math.max(1, Math.floor(dim))
+  if (d <= 1) return { min: 1, max: 1 }
+  return { min: 1, max: d - 1 }
+}
+
+/** Default toolbar grid-line indices when switching to intersection mode. */
+export function defaultToolbarGridIntersectionLines(block: Block): {
+  rowLine: number
+  colLine: number
+} {
+  const { rows, cols } = toolbarGridDimensions(block)
+  const rowRange = toolbarInternalGridLineRange(rows)
+  const colRange = toolbarInternalGridLineRange(cols)
+  return {
+    rowLine: Math.max(rowRange.min, Math.min(rowRange.max, Math.ceil(rows / 2))),
+    colLine: colRange.min,
+  }
+}

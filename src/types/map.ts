@@ -30,6 +30,11 @@ export type Road = {
   dashed?: boolean
 }
 
+export type BlockLabelHeaderPlacement = 'edge-strip' | 'grid-intersection'
+
+/** Intersection badge appearance: plain text or a fixed-size circle (map units). */
+export type BlockLabelHeaderIntersectionStyle = 'text' | 'circle'
+
 export type Block = {
   id: string
   label: string
@@ -45,6 +50,18 @@ export type Block = {
    * Omit for editor default (1 = 100% of one cell step).
    */
   labelStripDepthRatio?: number
+  /** Block title placement mode; omit for edge-strip (legacy default). */
+  labelHeaderPlacement?: BlockLabelHeaderPlacement
+  /** Toolbar 1-based internal row grid line (1 .. toolbarRows − 1) for grid-intersection mode. */
+  labelHeaderGridRowLine?: number
+  /** Toolbar 1-based internal col grid line (1 .. toolbarCols − 1) for grid-intersection mode. */
+  labelHeaderGridColLine?: number
+  /** Intersection badge: text-only (default) or fixed-size circle. */
+  labelHeaderIntersectionStyle?: BlockLabelHeaderIntersectionStyle
+  /** Circle radius in map units — independent of cell size; used when style is `circle`. */
+  labelHeaderCircleRadiusMapUnits?: number
+  /** @deprecated Legacy cell-fraction radius; migrated on read to map units. */
+  labelHeaderCircleRadiusRatio?: number
 }
 
 export type FacilityKind = 'school' | 'market' | 'service' | 'utility' | 'other'

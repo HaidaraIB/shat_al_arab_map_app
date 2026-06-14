@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import type { ComponentTransform, DrawingState, EditorTool } from '../../types/map'
+import type { BlockLabelHeaderIntersectionStyle, BlockLabelHeaderPlacement, ComponentTransform, DrawingState, EditorTool, PlotStatus } from '../../types/map'
 import { BLOCK_GRID_DIM_MAX } from '../../utils/geometry'
 import { ConfirmDialog } from './ConfirmDialog'
 
@@ -29,8 +29,11 @@ type Props = {
   onDeleteBlockRow: (blockId: string, row: number) => void
   onDeleteBlockCol: (blockId: string, col: number) => void
   selectedPlotNumber?: string | null
+  selectedPlotCount?: number
   onUpdateSelectedPlotNumber: (text: string) => void
   onDeleteSelectedPlot: () => void
+  onSelectAllPlotsInBlock?: () => void
+  onSetSelectedPlotsStatus?: (status: PlotStatus) => void
   onAddRoad: () => void
   onAddBlock: () => void
   onAddFacility: () => void
@@ -60,6 +63,24 @@ type Props = {
   /** 0–100 = % of one cell step along strip normal; null when no block selected. */
   selectedBlockLabelStripPercent?: number | null
   onSetBlockLabelStripPercent?: (percent: number) => void
+  /** Block title placement mode; null when no block selected. */
+  selectedBlockLabelHeaderPlacement?: BlockLabelHeaderPlacement | null
+  onSetBlockLabelHeaderPlacement?: (placement: BlockLabelHeaderPlacement) => void
+  /** Toolbar-logical internal grid-line indices for intersection mode. */
+  selectedBlockLabelHeaderRowLine?: number | null
+  selectedBlockLabelHeaderColLine?: number | null
+  minBlockLabelHeaderRowLine?: number | null
+  maxBlockLabelHeaderRowLine?: number | null
+  minBlockLabelHeaderColLine?: number | null
+  maxBlockLabelHeaderColLine?: number | null
+  onSetBlockLabelHeaderRowLine?: (line: number) => void
+  onSetBlockLabelHeaderColLine?: (line: number) => void
+  /** Intersection badge style; null when no block selected. */
+  selectedBlockLabelHeaderIntersectionStyle?: BlockLabelHeaderIntersectionStyle | null
+  onSetBlockLabelHeaderIntersectionStyle?: (style: BlockLabelHeaderIntersectionStyle) => void
+  /** Fixed map-units circle radius for intersection circle style. */
+  selectedBlockLabelHeaderCircleRadiusMapUnits?: number | null
+  onSetBlockLabelHeaderCircleRadiusMapUnits?: (radius: number) => void
   /** Toolbar row/col counts (C-block aware); null when no block selected. */
   selectedBlockToolbarRows?: number | null
   selectedBlockToolbarCols?: number | null
@@ -75,9 +96,6 @@ type Props = {
   /** Map-units font size for the current text selection (plot, road, block title, free label, facility title). */
   selectionFontSize?: number | null
   onSetSelectionFontSize?: (size: number) => void
-  /** Facility subtitle only; null when not applicable. */
-  selectionSubLabelFontSize?: number | null
-  onSetSubLabelFontSize?: (size: number) => void
 }
 
 /** لوحة أدوات الخريطة — العربية فقط، مع طيّ وإظهار. */
@@ -101,8 +119,11 @@ export function Toolbar({
   onDeleteBlockRow,
   onDeleteBlockCol,
   selectedPlotNumber,
+  selectedPlotCount = 0,
   onUpdateSelectedPlotNumber,
   onDeleteSelectedPlot,
+  onSelectAllPlotsInBlock,
+  onSetSelectedPlotsStatus,
   onAddRoad,
   onAddBlock,
   onAddFacility,
@@ -129,6 +150,20 @@ export function Toolbar({
   onFitView,
   selectedBlockLabelStripPercent = null,
   onSetBlockLabelStripPercent,
+  selectedBlockLabelHeaderPlacement = null,
+  onSetBlockLabelHeaderPlacement,
+  selectedBlockLabelHeaderRowLine = null,
+  selectedBlockLabelHeaderColLine = null,
+  minBlockLabelHeaderRowLine = null,
+  maxBlockLabelHeaderRowLine = null,
+  minBlockLabelHeaderColLine = null,
+  maxBlockLabelHeaderColLine = null,
+  onSetBlockLabelHeaderRowLine,
+  onSetBlockLabelHeaderColLine,
+  selectedBlockLabelHeaderIntersectionStyle = null,
+  onSetBlockLabelHeaderIntersectionStyle,
+  selectedBlockLabelHeaderCircleRadiusMapUnits = null,
+  onSetBlockLabelHeaderCircleRadiusMapUnits,
   selectedBlockToolbarRows = null,
   selectedBlockToolbarCols = null,
   minBlockToolbarRows = null,
@@ -140,8 +175,6 @@ export function Toolbar({
   hideElementScaleSliders = false,
   selectionFontSize = null,
   onSetSelectionFontSize,
-  selectionSubLabelFontSize = null,
-  onSetSubLabelFontSize,
 }: Props) {
   const [expanded, setExpanded] = useState(true)
   const [labelDraft, setLabelDraft] = useState('')
@@ -170,6 +203,25 @@ export function Toolbar({
     const o = blockSelectOptions.find((x) => x.id === mapSelectedBlockId)
     return o?.label ?? mapSelectedBlockId ?? ''
   }, [blockSelectOptions, mapSelectedBlockId])
+
+  const selectionFontSizeLabel = useMemo(() => {
+    if (mapSelectedBlockId) return 'حجم خط عنوان البلوك'
+    if (selectedPlotCount === 1) return 'حجم خط الخلية'
+    if (selectedPlotCount > 1) return 'حجم خط الخلايا'
+    if (selectedTypeLabel === 'شارع') return 'حجم خط الشارع'
+    if (selectedTypeLabel === 'نص') return 'حجم خط النص'
+    if (selectedTypeLabel === 'مرفق' || selectedTypeLabel === 'تسمية مرفق') return 'حجم خط المرفق'
+    return 'حجم الخط'
+  }, [mapSelectedBlockId, selectedPlotCount, selectedTypeLabel])
+
+  const selectionFontSizeHint = useMemo(() => {
+    if (mapSelectedBlockId) {
+      return selectedBlockLabelHeaderPlacement === 'grid-intersection'
+        ? 'اسم البلوك في وضع تقاطع الشبكة — مستقل عن أرقام الخلايا.'
+        : 'اسم البلوك على المخطط — ليس أرقام الخلايا.'
+    }
+    return null
+  }, [mapSelectedBlockId, selectedBlockLabelHeaderPlacement])
 
   useEffect(() => {
     setLabelDraft(editableLabelText ?? '')
@@ -239,7 +291,8 @@ export function Toolbar({
           </button>
         </div>
 
-        <div className="space-y-1.5">
+        <div className="space-y-2">
+          <p className="text-[10px] font-bold text-slate-500">العرض</p>
           <div className="flex flex-wrap gap-1">
             <button
               type="button"
@@ -267,6 +320,7 @@ export function Toolbar({
           </div>
           {isAdmin && (
             <>
+              <p className="text-[10px] font-bold text-slate-500 pt-0.5">السجل والملف</p>
               <div className="flex flex-wrap gap-1">
                 <button
                   type="button"
@@ -324,200 +378,92 @@ export function Toolbar({
         </div>
 
         {isAdmin && (
-        <div className="border-t border-slate-100 pt-2 space-y-2">
-          <p className="text-[10px] font-bold text-slate-500">
-            العنصر المحدد
-            {selectionCount > 1 ? ` (${selectionCount})` : ''}
-          </p>
-          <div className="space-y-1">
-            <p className="text-[10px] text-slate-500">
+        <div className="border-t border-slate-100 pt-2 space-y-3">
+          <div>
+            <p className="text-[10px] font-bold text-slate-500">
+              العنصر المحدد
+              {selectionCount > 1 ? ` (${selectionCount})` : ''}
+            </p>
+            <p className="text-[10px] text-slate-500 mt-0.5">
               النوع: {selectedTypeLabel ?? 'لا يوجد'}
             </p>
-            {selectedBlockLabelStripPercent != null && onSetBlockLabelStripPercent && (
-              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2 space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] font-bold text-slate-700">ارتفاع شريط عنوان البلوك</span>
-                  <span className="text-[10px] font-bold tabular-nums text-slate-600">
-                    {selectedBlockLabelStripPercent}%
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={1}
-                  value={selectedBlockLabelStripPercent}
-                  onChange={(e) => onSetBlockLabelStripPercent(Number(e.target.value))}
-                  className="w-full accent-indigo-600"
-                  aria-label="ارتفاع شريط عنوان البلوك"
-                />
-                <p className="text-[9px] text-slate-500 leading-snug">سُمك الشريط فوق الصف أو العمود الأول.</p>
-              </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-200 bg-slate-50/50 p-2 space-y-2">
+            <p className="text-[10px] font-bold text-slate-600">التحويل والطبقة</p>
+            {selectionCount > 1 && (
+              <p className="text-[10px] text-slate-400 leading-snug">
+                الأشرطة تعرض قيم أول عنصر؛ التعديل يطبَّق على كل المحددين.
+              </p>
             )}
-            {selectedBlockToolbarCols != null &&
-              minBlockToolbarCols != null &&
-              onSetBlockToolbarCols && (
-              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2 space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] font-bold text-slate-700">عدد الأعمدة</span>
-                  <span className="text-[10px] font-bold tabular-nums text-slate-600">
-                    {selectedBlockToolbarCols}
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min={minBlockToolbarCols}
-                  max={BLOCK_GRID_DIM_MAX}
-                  step={1}
-                  value={selectedBlockToolbarCols}
-                  onChange={(e) => onSetBlockToolbarCols(Number(e.target.value))}
-                  className="w-full accent-indigo-600"
-                  aria-label="عدد الأعمدة"
-                />
-                <p className="text-[9px] text-slate-500 leading-snug">
-                  يوسّع أو يقلّص عدد أعمدة الشبكة.
-                </p>
-              </div>
+            {!hasSelection && (
+              <p className="text-[10px] text-slate-400">حدد عنصرًا على الخريطة لتعديل الدوران والمقياس.</p>
             )}
-            {selectedBlockToolbarRows != null &&
-              minBlockToolbarRows != null &&
-              onSetBlockToolbarRows && (
-              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2 space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] font-bold text-slate-700">عدد الصفوف</span>
-                  <span className="text-[10px] font-bold tabular-nums text-slate-600">
-                    {selectedBlockToolbarRows}
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min={minBlockToolbarRows}
-                  max={BLOCK_GRID_DIM_MAX}
-                  step={1}
-                  value={selectedBlockToolbarRows}
-                  onChange={(e) => onSetBlockToolbarRows(Number(e.target.value))}
-                  className="w-full accent-indigo-600"
-                  aria-label="عدد الصفوف"
-                />
-                <p className="text-[9px] text-slate-500 leading-snug">
-                  يوسّع أو يقلّص عدد صفوف الشبكة.
-                </p>
-              </div>
-            )}
-            {selectedBlockPlotFontSize != null && onSetBlockPlotFontSize && (
-              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2 space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] font-bold text-slate-700">حجم خط الوحدات</span>
-                  <span className="text-[10px] font-bold tabular-nums text-slate-600">
-                    {selectedBlockPlotFontSize}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => onSetBlockPlotFontSize(selectedBlockPlotFontSize - 1)}
-                    className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
-                    aria-label="تصغير خط الوحدات"
-                  >
-                    −
-                  </button>
+            <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
+              <span className="font-semibold">الدوران</span>
+              <input
+                type="range"
+                min={-180}
+                max={180}
+                step={1}
+                value={t.rotationDeg}
+                disabled={!hasSelection}
+                onChange={(e) => onPatchSelected({ rotationDeg: Number(e.target.value) })}
+                className="mt-1 w-full accent-slate-900 disabled:opacity-40"
+              />
+              <span className="text-[10px] text-slate-500">{t.rotationDeg}°</span>
+            </label>
+            {!hideElementScaleSliders && (
+              <>
+                <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
+                  <span className="font-semibold">عرض العنصر</span>
                   <input
                     type="range"
-                    min={4}
-                    max={64}
-                    step={1}
-                    value={selectedBlockPlotFontSize}
-                    onChange={(e) => onSetBlockPlotFontSize(Number(e.target.value))}
-                    className="min-w-0 flex-1 accent-indigo-600"
-                    aria-label="حجم خط الوحدات"
+                    min={0.25}
+                    max={30}
+                    step={0.05}
+                    value={t.scaleX}
+                    disabled={!hasSelection}
+                    onChange={(e) => onPatchSelected({ scaleX: Number(e.target.value) })}
+                    className="mt-1 w-full accent-slate-900 disabled:opacity-40"
                   />
-                  <button
-                    type="button"
-                    onClick={() => onSetBlockPlotFontSize(selectedBlockPlotFontSize + 1)}
-                    className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
-                    aria-label="تكبير خط الوحدات"
-                  >
-                    +
-                  </button>
-                </div>
-                <p className="text-[9px] text-slate-500 leading-snug">
-                  يطبَّق على كل الوحدات داخل البلوك المحدد.
-                </p>
-              </div>
-            )}
-            {selectionFontSize != null && onSetSelectionFontSize && (
-              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2 space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] font-bold text-slate-700">حجم الخط (وحدات الخريطة)</span>
-                  <span className="text-[10px] font-bold tabular-nums text-slate-600">{selectionFontSize}</span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => onSetSelectionFontSize(selectionFontSize - 1)}
-                    className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
-                    aria-label="تصغير الخط"
-                  >
-                    −
-                  </button>
+                  <span className="text-[10px] text-slate-500">×{t.scaleX.toFixed(2)}</span>
+                </label>
+                <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
+                  <span className="font-semibold">ارتفاع العنصر</span>
                   <input
                     type="range"
-                    min={4}
-                    max={64}
-                    step={1}
-                    value={selectionFontSize}
-                    onChange={(e) => onSetSelectionFontSize(Number(e.target.value))}
-                    className="min-w-0 flex-1 accent-indigo-600"
-                    aria-label="حجم الخط"
+                    min={0.25}
+                    max={30}
+                    step={0.05}
+                    value={t.scaleY}
+                    disabled={!hasSelection}
+                    onChange={(e) => onPatchSelected({ scaleY: Number(e.target.value) })}
+                    className="mt-1 w-full accent-slate-900 disabled:opacity-40"
                   />
-                  <button
-                    type="button"
-                    onClick={() => onSetSelectionFontSize(selectionFontSize + 1)}
-                    className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
-                    aria-label="تكبير الخط"
-                  >
-                    +
-                  </button>
-                </div>
-                <p className="text-[9px] text-slate-500 leading-snug">يُحفظ مع الملف مع التحجيم.</p>
-              </div>
+                  <span className="text-[10px] text-slate-500">×{t.scaleY.toFixed(2)}</span>
+                </label>
+              </>
             )}
-            {selectionSubLabelFontSize != null && onSetSubLabelFontSize && (
-              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2 space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[10px] font-bold text-slate-700">حجم السطر الثاني (المرفق)</span>
-                  <span className="text-[10px] font-bold tabular-nums text-slate-600">{selectionSubLabelFontSize}</span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => onSetSubLabelFontSize(selectionSubLabelFontSize - 1)}
-                    className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
-                    aria-label="تصغير السطر الثاني"
-                  >
-                    −
-                  </button>
-                  <input
-                    type="range"
-                    min={4}
-                    max={40}
-                    step={1}
-                    value={selectionSubLabelFontSize}
-                    onChange={(e) => onSetSubLabelFontSize(Number(e.target.value))}
-                    className="min-w-0 flex-1 accent-indigo-600"
-                    aria-label="حجم السطر الثاني"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => onSetSubLabelFontSize(selectionSubLabelFontSize + 1)}
-                    className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
-                    aria-label="تكبير السطر الثاني"
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
-            )}
+            <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
+              <span className="font-semibold">الترتيب الطبقي (Z)</span>
+              <input
+                type="range"
+                min={0}
+                max={zMax}
+                step={1}
+                value={zPosition}
+                disabled={!hasSelection}
+                onChange={(e) => onChangeSelectedZ(Number(e.target.value))}
+                className="mt-1 w-full accent-slate-900 disabled:opacity-40"
+              />
+              <span className="text-[10px] text-slate-500">
+                الحالي: {zPosition} (من 0 إلى {zMax})
+              </span>
+            </label>
+          </div>
+
+          <div className="space-y-2">
             {editableLabelText !== null && (
               <div className="space-y-1">
                 <p className="text-[10px] font-bold text-slate-500">نص الملصق</p>
@@ -537,7 +483,9 @@ export function Toolbar({
                 </button>
               </div>
             )}
-            {selectedPlotNumber !== null && selectedPlotNumber !== undefined && (
+            {selectedPlotCount === 1 &&
+              selectedPlotNumber !== null &&
+              selectedPlotNumber !== undefined && (
               <div className="space-y-1">
                 <p className="text-[10px] font-bold text-slate-500">الخلية المحددة</p>
                 <input
@@ -572,27 +520,350 @@ export function Toolbar({
                 </div>
               </div>
             )}
-            <button
-              type="button"
-              onClick={() =>
-                setPendingAction({
-                  title: 'حذف العناصر المحددة',
-                  message: 'سيتم حذف كل العناصر المحددة من التصميم الحالي.',
-                  confirmLabel: 'حذف',
-                  run: onDeleteSelected,
-                })
-              }
-              disabled={!hasSelection}
-              className="w-full rounded-lg border border-rose-200 bg-rose-50 py-1.5 text-[11px] font-bold text-rose-700 hover:bg-rose-100 disabled:opacity-40"
-            >
-              حذف المحدد
-            </button>
+            {selectedPlotCount > 1 && (
+              <div className="space-y-1.5">
+                <p className="text-[10px] font-bold text-slate-500">
+                  {selectedPlotCount} خلايا محددة
+                </p>
+                {onSetSelectedPlotsStatus && (
+                  <div className="space-y-0.5">
+                    <p className="text-[10px] text-slate-500">تغيير الحالة</p>
+                    <select
+                      defaultValue=""
+                      onChange={(e) => {
+                        const status = e.target.value as PlotStatus
+                        if (!status) return
+                        e.target.value = ''
+                        setPendingAction({
+                          title: 'تغيير حالة الوحدات',
+                          message: `سيتم تغيير حالة ${selectedPlotCount} وحدة إلى «${status === 'available' ? 'متاحة' : status === 'reserved' ? 'محجوزة' : status === 'sold' ? 'مباعة' : 'محجوزة موظف'}».`,
+                          confirmLabel: 'تطبيق',
+                          run: () => onSetSelectedPlotsStatus(status),
+                        })
+                      }}
+                      className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-700"
+                    >
+                      <option value="" disabled>
+                        اختر الحالة…
+                      </option>
+                      <option value="available">متاحة</option>
+                      <option value="reserved">محجوزة</option>
+                      <option value="sold">مباعة</option>
+                      <option value="employee_reserved">محجوزة موظف</option>
+                    </select>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPendingAction({
+                      title: `حذف ${selectedPlotCount} خلية`,
+                      message: `سيتم حذف ${selectedPlotCount} خلية من المخطط الحالي نهائيًا.`,
+                      confirmLabel: 'حذف',
+                      run: onDeleteSelectedPlot,
+                    })
+                  }
+                  className="w-full rounded-lg border border-rose-200 bg-rose-50 py-1.5 text-[11px] font-bold text-rose-700 hover:bg-rose-100"
+                >
+                  حذف الخلايا المحددة
+                </button>
+              </div>
+            )}
           </div>
+
+          {(selectionFontSize != null && onSetSelectionFontSize) ||
+          (selectedBlockPlotFontSize != null && onSetBlockPlotFontSize) ? (
+            <div className="rounded-lg border border-slate-200 bg-slate-50/50 p-2 space-y-2">
+              <p className="text-[10px] font-bold text-slate-600">الخط والحجم</p>
+              {selectionFontSize != null && onSetSelectionFontSize && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-bold text-slate-700">
+                      {selectionFontSizeLabel}
+                    </span>
+                    <span className="text-[10px] font-bold tabular-nums text-slate-600">
+                      {selectionFontSize}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => onSetSelectionFontSize(selectionFontSize - 1)}
+                      className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                      aria-label={`تصغير ${selectionFontSizeLabel}`}
+                    >
+                      −
+                    </button>
+                    <input
+                      type="range"
+                      min={4}
+                      max={64}
+                      step={1}
+                      value={selectionFontSize}
+                      onChange={(e) => onSetSelectionFontSize(Number(e.target.value))}
+                      className="min-w-0 flex-1 accent-indigo-600"
+                      aria-label={selectionFontSizeLabel}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => onSetSelectionFontSize(selectionFontSize + 1)}
+                      className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                      aria-label={`تكبير ${selectionFontSizeLabel}`}
+                    >
+                      +
+                    </button>
+                  </div>
+                  {selectionFontSizeHint && (
+                    <p className="text-[9px] text-slate-500 leading-snug">{selectionFontSizeHint}</p>
+                  )}
+                </div>
+              )}
+              {selectedBlockPlotFontSize != null && onSetBlockPlotFontSize && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-bold text-slate-700">حجم خط أرقام الخلايا</span>
+                    <span className="text-[10px] font-bold tabular-nums text-slate-600">
+                      {selectedBlockPlotFontSize}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => onSetBlockPlotFontSize(selectedBlockPlotFontSize - 1)}
+                      className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                      aria-label="تصغير خط أرقام الخلايا"
+                    >
+                      −
+                    </button>
+                    <input
+                      type="range"
+                      min={4}
+                      max={64}
+                      step={1}
+                      value={selectedBlockPlotFontSize}
+                      onChange={(e) => onSetBlockPlotFontSize(Number(e.target.value))}
+                      className="min-w-0 flex-1 accent-indigo-600"
+                      aria-label="حجم خط أرقام الخلايا"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => onSetBlockPlotFontSize(selectedBlockPlotFontSize + 1)}
+                      className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                      aria-label="تكبير خط أرقام الخلايا"
+                    >
+                      +
+                    </button>
+                  </div>
+                  <p className="text-[9px] text-slate-500 leading-snug">
+                    أرقام/أسماء الوحدات داخل البلوك — وليس عنوان البلوك.
+                  </p>
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {selectedBlockLabelHeaderPlacement != null && onSetBlockLabelHeaderPlacement && (
+              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2 space-y-2">
+                <p className="text-[10px] font-bold text-slate-700">عنوان البلوك</p>
+                <div className="flex flex-col gap-1.5">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="block-label-header-placement"
+                      checked={selectedBlockLabelHeaderPlacement === 'edge-strip'}
+                      onChange={() => onSetBlockLabelHeaderPlacement('edge-strip')}
+                      className="accent-indigo-600"
+                    />
+                    <span className="text-[10px] font-semibold text-slate-700">شريط على الحافة</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="block-label-header-placement"
+                      checked={selectedBlockLabelHeaderPlacement === 'grid-intersection'}
+                      onChange={() => onSetBlockLabelHeaderPlacement('grid-intersection')}
+                      className="accent-indigo-600"
+                    />
+                    <span className="text-[10px] font-semibold text-slate-700">تقاطع الشبكة</span>
+                  </label>
+                </div>
+                {selectedBlockLabelHeaderPlacement === 'edge-strip' &&
+                  selectedBlockLabelStripPercent != null &&
+                  onSetBlockLabelStripPercent && (
+                  <div className="space-y-1.5 pt-0.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-bold text-slate-700">ارتفاع شريط عنوان البلوك</span>
+                      <span className="text-[10px] font-bold tabular-nums text-slate-600">
+                        {selectedBlockLabelStripPercent}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={selectedBlockLabelStripPercent}
+                      onChange={(e) => onSetBlockLabelStripPercent(Number(e.target.value))}
+                      className="w-full accent-indigo-600"
+                      aria-label="ارتفاع شريط عنوان البلوك"
+                    />
+                    <p className="text-[9px] text-slate-500 leading-snug">سُمك الشريط فوق الصف أو العمود الأول.</p>
+                  </div>
+                )}
+                {selectedBlockLabelHeaderPlacement === 'grid-intersection' && (
+                  <div className="space-y-2 pt-0.5">
+                    {selectedBlockLabelHeaderRowLine != null &&
+                      minBlockLabelHeaderRowLine != null &&
+                      maxBlockLabelHeaderRowLine != null &&
+                      onSetBlockLabelHeaderRowLine &&
+                      maxBlockLabelHeaderRowLine > minBlockLabelHeaderRowLine && (
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] font-bold text-slate-700">
+                            {(selectedBlockToolbarRows ?? 0) >= (selectedBlockToolbarCols ?? 0)
+                              ? 'موضع على الشريط'
+                              : 'خط صف التقاطع'}
+                          </span>
+                          <span className="text-[10px] font-bold tabular-nums text-slate-600">
+                            {selectedBlockLabelHeaderRowLine}
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={minBlockLabelHeaderRowLine}
+                          max={maxBlockLabelHeaderRowLine}
+                          step={1}
+                          value={selectedBlockLabelHeaderRowLine}
+                          onChange={(e) => onSetBlockLabelHeaderRowLine(Number(e.target.value))}
+                          className="w-full accent-indigo-600"
+                          aria-label="موضع على الشريط"
+                        />
+                        <p className="text-[9px] text-slate-500 leading-snug">
+                          يحرّك العنوان أفقياً على طول الشريط.
+                        </p>
+                      </div>
+                    )}
+                    {selectedBlockLabelHeaderColLine != null &&
+                      minBlockLabelHeaderColLine != null &&
+                      maxBlockLabelHeaderColLine != null &&
+                      onSetBlockLabelHeaderColLine &&
+                      maxBlockLabelHeaderColLine > minBlockLabelHeaderColLine && (
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] font-bold text-slate-700">خط عمود التقاطع</span>
+                          <span className="text-[10px] font-bold tabular-nums text-slate-600">
+                            {selectedBlockLabelHeaderColLine}
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={minBlockLabelHeaderColLine}
+                          max={maxBlockLabelHeaderColLine}
+                          step={1}
+                          value={selectedBlockLabelHeaderColLine}
+                          onChange={(e) => onSetBlockLabelHeaderColLine(Number(e.target.value))}
+                          className="w-full accent-indigo-600"
+                          aria-label="خط عمود التقاطع"
+                        />
+                        <p className="text-[9px] text-slate-500 leading-snug">
+                          يحرّك العنوان عمودياً بين صفوف الشبكة.
+                        </p>
+                      </div>
+                    )}
+                    {minBlockLabelHeaderColLine != null &&
+                      maxBlockLabelHeaderColLine != null &&
+                      minBlockLabelHeaderColLine >= maxBlockLabelHeaderColLine &&
+                      (selectedBlockToolbarCols ?? 0) <= 2 && (
+                      <p className="text-[9px] text-slate-500 leading-snug rounded-md bg-white/80 px-2 py-1 border border-slate-100">
+                        العنوان على فاصل الصفين (بين الشريطين) — ثابت تلقائياً.
+                      </p>
+                    )}
+                    {selectedBlockLabelHeaderIntersectionStyle != null &&
+                      onSetBlockLabelHeaderIntersectionStyle && (
+                      <div className="flex flex-col gap-1.5">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="block-label-header-intersection-style"
+                            checked={selectedBlockLabelHeaderIntersectionStyle === 'text'}
+                            onChange={() => onSetBlockLabelHeaderIntersectionStyle('text')}
+                            className="accent-indigo-600"
+                          />
+                          <span className="text-[10px] font-semibold text-slate-700">نص فقط</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="block-label-header-intersection-style"
+                            checked={selectedBlockLabelHeaderIntersectionStyle === 'circle'}
+                            onChange={() => onSetBlockLabelHeaderIntersectionStyle('circle')}
+                            className="accent-indigo-600"
+                          />
+                          <span className="text-[10px] font-semibold text-slate-700">دائرة</span>
+                        </label>
+                      </div>
+                    )}
+                    {selectedBlockLabelHeaderIntersectionStyle === 'circle' &&
+                      selectedBlockLabelHeaderCircleRadiusMapUnits != null &&
+                      onSetBlockLabelHeaderCircleRadiusMapUnits && (
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] font-bold text-slate-700">نصف قطر الدائرة</span>
+                          <span className="text-[10px] font-bold tabular-nums text-slate-600">
+                            {selectedBlockLabelHeaderCircleRadiusMapUnits}
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={4}
+                          max={32}
+                          step={1}
+                          value={selectedBlockLabelHeaderCircleRadiusMapUnits}
+                          onChange={(e) =>
+                            onSetBlockLabelHeaderCircleRadiusMapUnits(Number(e.target.value))
+                          }
+                          className="w-full accent-indigo-600"
+                          aria-label="نصف قطر الدائرة"
+                        />
+                        <p className="text-[9px] text-slate-500 leading-snug">
+                          حجم ثابت بوحدات الخريطة — لا يتغيّر مع حجم الخلية.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+          <button
+            type="button"
+            onClick={() =>
+              setPendingAction({
+                title: 'حذف العناصر المحددة',
+                message: 'سيتم حذف كل العناصر المحددة من التصميم الحالي.',
+                confirmLabel: 'حذف',
+                run: onDeleteSelected,
+              })
+            }
+            disabled={!hasSelection}
+            className="w-full rounded-lg border border-rose-200 bg-rose-50 py-1.5 text-[11px] font-bold text-rose-700 hover:bg-rose-100 disabled:opacity-40"
+          >
+            حذف المحدد
+          </button>
 
           <div className="border-t border-slate-100 pt-2 space-y-2">
             <p className="text-[10px] font-bold text-slate-500">إضافة إلى الخريطة</p>
             {mapSelectedBlockId ? (
               <>
+                {onSelectAllPlotsInBlock && (
+                  <button
+                    type="button"
+                    onClick={onSelectAllPlotsInBlock}
+                    className="w-full rounded-lg border border-sky-200 bg-sky-50 py-1.5 text-[11px] font-bold text-sky-800 hover:bg-sky-100"
+                  >
+                    تحديد كل الوحدات في البلوك
+                  </button>
+                )}
                 <div className="rounded-lg border border-slate-200 p-2 space-y-1.5">
                   <p className="text-[10px] font-bold text-slate-600">إضافة وحدة</p>
                   <p className="text-[9px] text-slate-500 leading-snug">
@@ -641,27 +912,55 @@ export function Toolbar({
                   </button>
                 </div>
 
-                <div className="rounded-lg border border-slate-200 p-2 space-y-1.5">
+                <div className="rounded-lg border border-slate-200 p-2 space-y-2">
                   <p className="text-[10px] font-bold text-slate-600">شبكة البلوك المحدد</p>
                   <p className="text-[9px] text-slate-500 leading-snug">
-                    توسيع الشبكة أو حذف صف/عمود كامل لهذا البلوك المحدد على الخريطة.
+                    ضبط أبعاد الشبكة أو حذف صف/عمود كامل لهذا البلوك.
                   </p>
-                  <div className="flex flex-wrap items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => onGrowBlockGrid(mapSelectedBlockId, 1, 0)}
-                      className="rounded-md border border-slate-200 px-2 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
-                    >
-                      +صف
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onGrowBlockGrid(mapSelectedBlockId, 0, 1)}
-                      className="rounded-md border border-slate-200 px-2 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
-                    >
-                      +عمود
-                    </button>
-                  </div>
+                  {selectedBlockToolbarRows != null &&
+                    minBlockToolbarRows != null &&
+                    onSetBlockToolbarRows && (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-bold text-slate-700">عدد الصفوف</span>
+                        <span className="text-[10px] font-bold tabular-nums text-slate-600">
+                          {selectedBlockToolbarRows}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={minBlockToolbarRows}
+                        max={BLOCK_GRID_DIM_MAX}
+                        step={1}
+                        value={selectedBlockToolbarRows}
+                        onChange={(e) => onSetBlockToolbarRows(Number(e.target.value))}
+                        className="w-full accent-indigo-600"
+                        aria-label="عدد الصفوف"
+                      />
+                    </div>
+                  )}
+                  {selectedBlockToolbarCols != null &&
+                    minBlockToolbarCols != null &&
+                    onSetBlockToolbarCols && (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-bold text-slate-700">عدد الأعمدة</span>
+                        <span className="text-[10px] font-bold tabular-nums text-slate-600">
+                          {selectedBlockToolbarCols}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={minBlockToolbarCols}
+                        max={BLOCK_GRID_DIM_MAX}
+                        step={1}
+                        value={selectedBlockToolbarCols}
+                        onChange={(e) => onSetBlockToolbarCols(Number(e.target.value))}
+                        className="w-full accent-indigo-600"
+                        aria-label="عدد الأعمدة"
+                      />
+                    </div>
+                  )}
                   <p className="text-[10px] text-slate-500">
                     {addFormStats?.rows ?? 1} صف × {addFormStats?.cols ?? 1} عمود · مشغول {addFormStats.occupiedCells}/
                     {addFormStats.totalCells}
@@ -722,6 +1021,7 @@ export function Toolbar({
               </>
             ) : null}
 
+            <p className="text-[10px] font-bold text-slate-600 pt-0.5">عناصر جديدة</p>
             <div className="flex flex-wrap gap-1">
               <button
                 type="button"
@@ -739,6 +1039,16 @@ export function Toolbar({
               </button>
               <button
                 type="button"
+                onClick={onAddLabel}
+                className="rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+              >
+                إضافة نص
+              </button>
+            </div>
+            <p className="text-[10px] font-bold text-slate-600">المرافق</p>
+            <div className="flex flex-wrap gap-1">
+              <button
+                type="button"
                 onClick={onAddFacility}
                 className="rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
               >
@@ -754,13 +1064,6 @@ export function Toolbar({
                 }`}
               >
                 رسم مرفق
-              </button>
-              <button
-                type="button"
-                onClick={onAddLabel}
-                className="rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
-              >
-                إضافة نص
               </button>
             </div>
             {facilityDrawing && (
@@ -807,79 +1110,6 @@ export function Toolbar({
                 </div>
               </div>
             )}
-          </div>
-          <div className="border-t border-slate-100 pt-2 space-y-2">
-            <p className="text-[10px] font-bold text-slate-500">تحويل العنصر المحدد</p>
-          {selectionCount > 1 && (
-            <p className="text-[10px] text-slate-400 leading-snug">
-              الأشرطة تعرض قيم أول عنصر؛ التعديل يطبَّق على كل المحددين.
-            </p>
-          )}
-          {!hasSelection && (
-            <p className="text-[10px] text-slate-400">حدد عنصرًا على الخريطة لتعديل الدوران والمقياس.</p>
-          )}
-          <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
-            <span className="font-semibold">الدوران</span>
-            <input
-              type="range"
-              min={-180}
-              max={180}
-              step={1}
-              value={t.rotationDeg}
-              disabled={!hasSelection}
-              onChange={(e) => onPatchSelected({ rotationDeg: Number(e.target.value) })}
-              className="mt-1 w-full accent-slate-900 disabled:opacity-40"
-            />
-            <span className="text-[10px] text-slate-500">{t.rotationDeg}°</span>
-          </label>
-          {!hideElementScaleSliders && (
-            <>
-              <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
-                <span className="font-semibold">عرض العنصر</span>
-                <input
-                  type="range"
-                  min={0.25}
-                  max={30}
-                  step={0.05}
-                  value={t.scaleX}
-                  disabled={!hasSelection}
-                  onChange={(e) => onPatchSelected({ scaleX: Number(e.target.value) })}
-                  className="mt-1 w-full accent-slate-900 disabled:opacity-40"
-                />
-                <span className="text-[10px] text-slate-500">×{t.scaleX.toFixed(2)}</span>
-              </label>
-              <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
-                <span className="font-semibold">ارتفاع العنصر</span>
-                <input
-                  type="range"
-                  min={0.25}
-                  max={30}
-                  step={0.05}
-                  value={t.scaleY}
-                  disabled={!hasSelection}
-                  onChange={(e) => onPatchSelected({ scaleY: Number(e.target.value) })}
-                  className="mt-1 w-full accent-slate-900 disabled:opacity-40"
-                />
-                <span className="text-[10px] text-slate-500">×{t.scaleY.toFixed(2)}</span>
-              </label>
-            </>
-          )}
-          <label className={`block text-xs ${hasSelection ? 'text-slate-700' : 'text-slate-400'}`}>
-            <span className="font-semibold">الترتيب الطبقي (Z)</span>
-            <input
-              type="range"
-              min={0}
-              max={zMax}
-              step={1}
-              value={zPosition}
-              disabled={!hasSelection}
-              onChange={(e) => onChangeSelectedZ(Number(e.target.value))}
-              className="mt-1 w-full accent-slate-900 disabled:opacity-40"
-            />
-            <span className="text-[10px] text-slate-500">
-              الحالي: {zPosition} (من 0 إلى {zMax})
-            </span>
-          </label>
           </div>
         </div>
         )}

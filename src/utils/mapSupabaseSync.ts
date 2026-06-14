@@ -5,7 +5,7 @@ export type PlotStateRow = Database['public']['Tables']['plot_state']['Row']
 
 const BOOKING_META_KEYS = ['customerName', 'note', 'reservedAt', 'reservedUntil', 'price', 'employeePrice'] as const
 
-function stripBookingMeta(meta: Record<string, unknown> | undefined): Record<string, unknown> {
+export function stripBookingMeta(meta: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!meta) return {}
   const next = { ...meta }
   for (const k of BOOKING_META_KEYS) {

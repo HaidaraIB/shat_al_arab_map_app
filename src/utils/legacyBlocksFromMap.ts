@@ -5,6 +5,100 @@ import { UnitStatus } from '../types'
 import { polygonBounds } from './geometry'
 import { toolbarGridDimensions } from './blockToolbarGrid'
 
+type CategoryPricingConfig = {
+  basePrice: number
+  baseEmployeePrice: number
+  baseArea: number
+  cornerPremium: number
+  cornerAreaBonus: number
+}
+
+function parseMetaNum(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+function categoryDefaults(
+  cfg: CategoryPricingConfig,
+  isCorner: boolean,
+): { price: number; employeePrice: number; area: number } {
+  const cornerMul = 1 + cfg.cornerPremium / 100
+  return {
+    price: isCorner ? cfg.basePrice * cornerMul : cfg.basePrice,
+    employeePrice: isCorner ? cfg.baseEmployeePrice * cornerMul : cfg.baseEmployeePrice,
+    area: isCorner ? cfg.baseArea + cfg.cornerAreaBonus : cfg.baseArea,
+  }
+}
+
+/** Fills missing price/area from category rules without overwriting plot-specific values. */
+export function enrichMapDataFromCategoryConfigs(
+  map: MapData,
+  configs: Record<'A' | 'B' | 'C', CategoryPricingConfig>,
+): MapData {
+  return {
+    ...map,
+    plots: map.plots.map((plot) => {
+      const mapBlock = map.blocks.find((b) => b.id === plot.blockId)
+      const blockDisplay = effectiveBlockLabel(map, plot.blockId)
+      const cat = resolvePlotCategory(plot, mapBlock, blockDisplay)
+      if (!cat || !configs[cat]) return plot
+
+      const meta = { ...(plot.meta ?? {}) } as Record<string, unknown>
+      const isCorner = meta.unitType === 'ركن'
+      const defaults = categoryDefaults(configs[cat], isCorner)
+      const price = parseMetaNum(meta.price)
+      const employeePrice = parseMetaNum(meta.employeePrice)
+      const area = parseMetaNum(meta.area)
+
+      return {
+        ...plot,
+        meta: {
+          ...meta,
+          category: meta.category ?? cat,
+          price: price ?? defaults.price,
+          employeePrice: employeePrice ?? defaults.employeePrice,
+          area: area ?? defaults.area,
+        },
+      }
+    }),
+  }
+}
+
+/** Applies category rules to every matching plot (used when saving settings). */
+export function applyCategoryConfigsToMap(
+  map: MapData,
+  configs: Record<'A' | 'B' | 'C', CategoryPricingConfig>,
+): MapData {
+  return {
+    ...map,
+    plots: map.plots.map((plot) => {
+      const mapBlock = map.blocks.find((b) => b.id === plot.blockId)
+      const blockDisplay = effectiveBlockLabel(map, plot.blockId)
+      const cat = resolvePlotCategory(plot, mapBlock, blockDisplay)
+      if (!cat || !configs[cat]) return plot
+
+      const meta = { ...(plot.meta ?? {}) } as Record<string, unknown>
+      const isCorner = meta.unitType === 'ركن'
+      const defaults = categoryDefaults(configs[cat], isCorner)
+
+      return {
+        ...plot,
+        meta: {
+          ...meta,
+          category: meta.category ?? cat,
+          price: defaults.price,
+          employeePrice: defaults.employeePrice,
+          area: defaults.area,
+        },
+      }
+    }),
+  }
+}
+
 /** Block title as shown on the map: marker label wins, then persisted `block.label`. */
 export function effectiveBlockLabel(map: MapData, blockId: string): string {
   const b = map.blocks.find((x) => x.id === blockId)

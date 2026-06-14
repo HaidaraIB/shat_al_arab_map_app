@@ -31,10 +31,10 @@ import { Unit, UnitStatus, Block } from './types';
 import type { PlotStatus } from './types/map';
 import { isUnitAvailableForSales, unitStatusDetailAr, unitStatusLabelAr } from './utils/plotStatus';
 import type { MapData } from './types/map';
-import { legacyBlocksFromMapData } from './utils/legacyBlocksFromMap';
+import { legacyBlocksFromMapData, enrichMapDataFromCategoryConfigs, applyCategoryConfigsToMap } from './utils/legacyBlocksFromMap';
 import { MapCanvas } from './components/map/MapCanvas';
 import { ConfirmDialog } from './components/map/ConfirmDialog';
-import { LoadingSpinner } from './components/ui/LoadingIndicator';
+import { LoadingIndicator, LoadingSpinner } from './components/ui/LoadingIndicator';
 import { useToast } from './components/ui/Toast';
 import { useMapStore, bootstrapPublicMap } from './store/mapStore';
 import { MAP_ZONES, getZoneConfig, type MapZoneId } from './config/zones';
@@ -208,30 +208,6 @@ function persistCategoryConfigsToStorage(c: Record<'A' | 'B' | 'C', CategoryConf
   }
 }
 
-/** Applies category rules to plot meta (preview or persist). */
-function applyCategoryConfigsToMap(map: MapData, newConfigs: Record<'A' | 'B' | 'C', CategoryConfig>): MapData {
-  return {
-    ...map,
-    plots: map.plots.map((plot) => {
-      const meta = (plot.meta ?? {}) as Record<string, unknown>
-      const cat = meta.category as 'A' | 'B' | 'C' | undefined
-      if (!cat || !newConfigs[cat]) return plot
-      const cfg = newConfigs[cat]
-      const isCorner = meta.unitType === 'ركن'
-      const cornerMul = 1 + cfg.cornerPremium / 100
-      return {
-        ...plot,
-        meta: {
-          ...meta,
-          price: isCorner ? cfg.basePrice * cornerMul : cfg.basePrice,
-          employeePrice: isCorner ? cfg.baseEmployeePrice * cornerMul : cfg.baseEmployeePrice,
-          area: isCorner ? cfg.baseArea + cfg.cornerAreaBonus : cfg.baseArea,
-        },
-      }
-    }),
-  }
-}
-
 export default function App() {
   const toast = useToast();
   const { profile, isAdmin, signOut } = useAuth();
@@ -283,24 +259,25 @@ export default function App() {
   const [resetDefaultsLoading, setResetDefaultsLoading] = useState(false)
   const [employeeSaveLoading, setEmployeeSaveLoading] = useState(false)
   const [deleteEmployeeLoading, setDeleteEmployeeLoading] = useState(false)
-  const selectedPlotIdOnMap = useMapStore((s) => s.selectedPlotId);
+  const selectedPlotIdsOnMap = useMapStore((s) => s.selectedPlotIds);
   const plotSelectionOpensUnitModal = useMapStore((s) => s.plotSelectionOpensUnitModal);
   const hoveredPlotIdOnMap = useMapStore((s) => s.hoveredPlotId);
   const mapData = useMapStore((s) => s.map);
   const activeMapId = useMapStore((s) => s.activeMapId);
+  const zoneLoading = useMapStore((s) => s.zoneLoading);
   const setActiveMapId = useMapStore((s) => s.setActiveMapId);
   const updateMapPlot = useMapStore((s) => s.updatePlot);
   const activeZone = useMemo(() => getZoneConfig(activeMapId), [activeMapId]);
 
   const handleZoneChange = React.useCallback((nextZoneId: MapZoneId) => {
-    if (nextZoneId === activeMapId) return
+    if (nextZoneId === activeMapId || zoneLoading) return
     persistCategoryConfigsToStorage(configs, activeMapId)
     persistZonePrefs(activeMapId, {
       reservationDuration,
       manualCollectionRate,
     })
     setActiveMapId(nextZoneId)
-  }, [activeMapId, configs, reservationDuration, manualCollectionRate, setActiveMapId])
+  }, [activeMapId, zoneLoading, configs, reservationDuration, manualCollectionRate, setActiveMapId])
 
   const configsLoadedForZoneRef = useRef<MapZoneId | null>(null)
 
@@ -398,7 +375,10 @@ export default function App() {
     void reloadTeamProfiles()
   }, [isAdmin, view, reloadTeamProfiles])
 
-  const data = useMemo(() => legacyBlocksFromMapData(mapData), [mapData]);
+  const data = useMemo(
+    () => legacyBlocksFromMapData(enrichMapDataFromCategoryConfigs(mapData, savedConfigs)),
+    [mapData, savedConfigs],
+  );
 
   const soldUnits = useMemo(() => {
     return data.flatMap(b => b.units.filter(u => u.status === UnitStatus.SOLD));
@@ -464,36 +444,43 @@ export default function App() {
     setBookingNote('')
   }
 
-  const openUnitModal = (unit: Unit) => {
-    if (!isAdmin && !isUnitAvailableForSales(unit.status)) return
-    setSelectedUnit(unit);
-    setTempPrice(unit.price || 0);
-    setTempEmployeePrice(unit.employeePrice || 0);
-    setIsEditingPrice(false);
-    setIsEditingEmployeePrice(false);
-  };
-
   const unitById = useMemo(() => {
     const m = new Map<string, Unit>();
     for (const b of data) for (const u of b.units) m.set(u.id, u);
     return m;
   }, [data]);
 
+  const openUnitModal = (unit: Unit, options?: { fromSettingsPreview?: boolean }) => {
+    if (!isAdmin && !isUnitAvailableForSales(unit.status)) return
+    const resolved = options?.fromSettingsPreview ? unit : (unitById.get(unit.id) ?? unit);
+    setSelectedUnit(resolved);
+    setTempPrice(resolved.price || 0);
+    setTempEmployeePrice(resolved.employeePrice || 0);
+    setIsEditingPrice(false);
+    setIsEditingEmployeePrice(false);
+  };
+
+  useEffect(() => {
+    if (!selectedUnit || view === 'settings') return;
+    const fresh = unitById.get(selectedUnit.id);
+    if (fresh) setSelectedUnit(fresh);
+  }, [unitById, selectedUnit?.id, view]);
+
   const mapFocusedUnit = useMemo(() => {
-    const id = hoveredPlotIdOnMap || selectedPlotIdOnMap;
+    const id = hoveredPlotIdOnMap || selectedPlotIdsOnMap[0] || null;
     if (!id) return null;
     const u = unitById.get(id) || null;
     if (!u) return null;
     if (!isAdmin && !isUnitAvailableForSales(u.status)) return null;
     return u;
-  }, [hoveredPlotIdOnMap, selectedPlotIdOnMap, unitById, isAdmin]);
+  }, [hoveredPlotIdOnMap, selectedPlotIdsOnMap, unitById, isAdmin]);
 
   useEffect(() => {
-    if (!selectedPlotIdOnMap || !plotSelectionOpensUnitModal) return;
-    const u = unitById.get(selectedPlotIdOnMap);
+    if (selectedPlotIdsOnMap.length !== 1 || !plotSelectionOpensUnitModal) return;
+    const u = unitById.get(selectedPlotIdsOnMap[0]);
     useMapStore.setState({ plotSelectionOpensUnitModal: false });
     if (u && (isAdmin || isUnitAvailableForSales(u.status))) openUnitModal(u);
-  }, [selectedPlotIdOnMap, plotSelectionOpensUnitModal, unitById, isAdmin]);
+  }, [selectedPlotIdsOnMap, plotSelectionOpensUnitModal, unitById, isAdmin]);
 
   const filteredData = useMemo(() => {
     return data.map(block => ({
@@ -703,7 +690,7 @@ export default function App() {
               value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
             />
           </div>
-          <ZoneTabBar activeMapId={activeMapId} onChange={handleZoneChange} />
+          <ZoneTabBar activeMapId={activeMapId} loading={zoneLoading} onChange={handleZoneChange} />
           <div className="flex bg-slate-100 rounded-xl p-1 border border-slate-200/50 hidden md:flex shrink-0">
             <FilterTab active={filter === 'all'} onClick={() => setFilter('all')}>الكل</FilterTab>
             <FilterTab active={filter === UnitStatus.AVAILABLE} onClick={() => setFilter(UnitStatus.AVAILABLE)}>المتبقية</FilterTab>
@@ -1215,8 +1202,8 @@ export default function App() {
                       <tbody className="divide-y divide-slate-50">
                         {settingsPreviewData.flatMap(b => b.units)
                           .filter(u => !searchTerm || u.category === searchTerm || u.id.includes(searchTerm))
-                          .slice(0, 50).map(unit => (
-                          <tr key={unit.id} className="hover:bg-slate-50/50 transition-colors group cursor-pointer" onClick={() => openUnitModal(unit)}>
+                          .map(unit => (
+                          <tr key={unit.id} className="hover:bg-slate-50/50 transition-colors group cursor-pointer" onClick={() => openUnitModal(unit, { fromSettingsPreview: true })}>
                             <td className="p-6 font-black text-slate-800">وحدة {unit.id}</td>
                             <td className="p-6">
                               <span className={`px-3 py-1 rounded-lg text-[10px] font-black ${unit.unitType === 'ركن' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-700'}`}>
@@ -1360,6 +1347,19 @@ export default function App() {
                   </div>
                   <div className="flex-1 min-h-0 min-w-0 relative bg-slate-50">
                     <MapCanvas />
+                    {zoneLoading && (
+                      <div
+                        className="absolute inset-0 z-50 flex items-center justify-center bg-slate-50/80 backdrop-blur-[2px]"
+                        aria-busy="true"
+                        aria-live="polite"
+                      >
+                        <LoadingIndicator
+                          size="lg"
+                          message={`جاري تحميل ${activeZone.labelAr}…`}
+                          label={`جاري تحميل ${activeZone.labelAr}`}
+                        />
+                      </div>
+                    )}
                   </div>
                 </div>
                 {!isFullscreen && (
@@ -1827,19 +1827,25 @@ function SidebarItem({ icon, label, active = false, badge, className = '', onCli
 
 function ZoneTabBar({
   activeMapId,
+  loading = false,
   onChange,
 }: {
   activeMapId: MapZoneId
+  loading?: boolean
   onChange: (id: MapZoneId) => void
 }) {
   return (
-    <div className="flex bg-slate-100 rounded-xl p-1 border border-slate-200 shrink-0">
+    <div
+      className="flex items-center gap-2 bg-slate-100 rounded-xl p-1 border border-slate-200 shrink-0"
+      aria-busy={loading}
+    >
       {MAP_ZONES.map((zone) => (
         <button
           key={zone.id}
           type="button"
+          disabled={loading}
           onClick={() => onChange(zone.id)}
-          className={`px-4 py-1.5 rounded-lg text-[10px] font-black transition-all ${
+          className={`px-4 py-1.5 rounded-lg text-[10px] font-black transition-all disabled:cursor-not-allowed disabled:opacity-60 ${
             activeMapId === zone.id
               ? 'bg-slate-900 text-white shadow-md'
               : 'text-slate-400 hover:text-slate-600'
@@ -1848,6 +1854,9 @@ function ZoneTabBar({
           {zone.labelAr}
         </button>
       ))}
+      {loading && (
+        <LoadingSpinner size="sm" className="mx-1" label="جاري تحميل الزون" />
+      )}
     </div>
   )
 }

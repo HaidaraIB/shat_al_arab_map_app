@@ -1,4 +1,10 @@
-import type { Block, Point } from '../types/map'
+import type { Block, BlockLabelHeaderPlacement, BlockLabelHeaderIntersectionStyle, Point } from '../types/map'
+import {
+  defaultToolbarGridIntersectionLines,
+  toolbarGridDimensions,
+  toolbarGridLineToInternal,
+  toolbarInternalGridLineRange,
+} from './blockToolbarGrid'
 
 function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n))
@@ -359,4 +365,104 @@ export function blockLabelStripLayout(
   const cx = corners.reduce((s, p) => s + p.x, 0) / 4
   const cy = corners.reduce((s, p) => s + p.y, 0) / 4
   return { corners, cx, cy, stripDepth: depth, nx, ny }
+}
+
+export const LABEL_HEADER_CIRCLE_RATIO_MIN = 0.25
+export const LABEL_HEADER_CIRCLE_RATIO_MAX = 1
+export const LABEL_HEADER_CIRCLE_RATIO_DEFAULT = 0.55
+
+export const LABEL_HEADER_CIRCLE_RADIUS_MAP_MIN = 4
+export const LABEL_HEADER_CIRCLE_RADIUS_MAP_MAX = 32
+export const LABEL_HEADER_CIRCLE_RADIUS_MAP_DEFAULT = 10
+
+export function normalizeLabelHeaderPlacement(
+  placement?: BlockLabelHeaderPlacement,
+): BlockLabelHeaderPlacement {
+  return placement === 'grid-intersection' ? 'grid-intersection' : 'edge-strip'
+}
+
+export function normalizeLabelHeaderIntersectionStyle(
+  style?: BlockLabelHeaderIntersectionStyle,
+): BlockLabelHeaderIntersectionStyle {
+  return style === 'circle' ? 'circle' : 'text'
+}
+
+export function normalizeLabelHeaderCircleRatio(r?: number): number {
+  const v = r ?? LABEL_HEADER_CIRCLE_RATIO_DEFAULT
+  return Math.min(
+    LABEL_HEADER_CIRCLE_RATIO_MAX,
+    Math.max(LABEL_HEADER_CIRCLE_RATIO_MIN, v),
+  )
+}
+
+/** Fixed map-units circle radius; migrates legacy cell-fraction ratio when map units unset. */
+export function normalizeLabelHeaderCircleRadiusMapUnits(
+  block?: Pick<Block, 'labelHeaderCircleRadiusMapUnits' | 'labelHeaderCircleRadiusRatio'>,
+): number {
+  const raw = block?.labelHeaderCircleRadiusMapUnits
+  if (raw != null && Number.isFinite(raw)) {
+    return Math.min(
+      LABEL_HEADER_CIRCLE_RADIUS_MAP_MAX,
+      Math.max(LABEL_HEADER_CIRCLE_RADIUS_MAP_MIN, raw),
+    )
+  }
+  const legacy = block?.labelHeaderCircleRadiusRatio
+  if (legacy != null && Number.isFinite(legacy)) {
+    const ratio = normalizeLabelHeaderCircleRatio(legacy)
+    return Math.min(
+      LABEL_HEADER_CIRCLE_RADIUS_MAP_MAX,
+      Math.max(
+        LABEL_HEADER_CIRCLE_RADIUS_MAP_MIN,
+        Math.round(LABEL_HEADER_CIRCLE_RADIUS_MAP_MIN + ratio * 12),
+      ),
+    )
+  }
+  return LABEL_HEADER_CIRCLE_RADIUS_MAP_DEFAULT
+}
+
+export function clampToolbarGridIntersectionLines(
+  block: Block,
+  rowLine?: number,
+  colLine?: number,
+): { rowLine: number; colLine: number } {
+  const { rows, cols } = toolbarGridDimensions(block)
+  const rowRange = toolbarInternalGridLineRange(rows)
+  const colRange = toolbarInternalGridLineRange(cols)
+  const defaults = defaultToolbarGridIntersectionLines(block)
+  const rl = Math.max(rowRange.min, Math.min(rowRange.max, Math.floor(rowLine ?? defaults.rowLine)))
+  const cl = Math.max(colRange.min, Math.min(colRange.max, Math.floor(colLine ?? defaults.colLine)))
+  return { rowLine: rl, colLine: cl }
+}
+
+/**
+ * Block title anchor at an internal grid-line intersection.
+ * Toolbar row/col line indices are 1-based internal lines (1 .. toolbarDim − 1).
+ */
+export function blockLabelGridIntersectionLayout(
+  block: Block,
+  opts?: {
+    toolbarRowLine?: number
+    toolbarColLine?: number
+  },
+): { cx: number; cy: number } | null {
+  const poly = block.polygon
+  if (poly.length !== 4) return null
+  const { rowLine, colLine } = clampToolbarGridIntersectionLines(
+    block,
+    opts?.toolbarRowLine,
+    opts?.toolbarColLine,
+  )
+  const { rowLine: internalRowLine, colLine: internalColLine } = toolbarGridLineToInternal(
+    block,
+    rowLine,
+    colLine,
+  )
+  const [p0, p1, , p3] = poly
+  const R = Math.max(1, block.rows ?? 1)
+  const C = Math.max(1, block.cols ?? 1)
+  const ux = { x: (p1.x - p0.x) / C, y: (p1.y - p0.y) / C }
+  const vx = { x: (p3.x - p0.x) / R, y: (p3.y - p0.y) / R }
+  const cx = p0.x + ux.x * internalColLine + vx.x * internalRowLine
+  const cy = p0.y + ux.y * internalColLine + vx.y * internalRowLine
+  return { cx, cy }
 }

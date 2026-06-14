@@ -84,6 +84,18 @@ export async function upsertPlotStateFromPlot(plot: Plot, mapId: MapZoneId): Pro
   return { error: error?.message ?? null }
 }
 
+export async function upsertPlotStatesFromPlots(
+  plots: Plot[],
+  mapId: MapZoneId,
+): Promise<{ error: string | null }> {
+  const supabase = getSupabase()
+  if (!supabase) return { error: 'Cloud backend is not configured' }
+  if (plots.length === 0) return { error: null }
+  const rows = plots.map((p) => plotToRemotePatch(p, mapId))
+  const { error } = await supabase.from('plot_state').upsert(rows, { onConflict: 'map_id,plot_id' })
+  return { error: error?.message ?? null }
+}
+
 export function subscribePlotStateRealtime(
   onRow: (row: PlotStateRow) => void,
   mapId: MapZoneId,
