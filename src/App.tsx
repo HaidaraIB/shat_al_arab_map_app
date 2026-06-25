@@ -34,6 +34,9 @@ import type { MapData } from './types/map';
 import { legacyBlocksFromMapData, enrichMapDataFromCategoryConfigs, applyCategoryConfigsToMap } from './utils/legacyBlocksFromMap';
 import { MapCanvas } from './components/map/MapCanvas';
 import { ConfirmDialog } from './components/map/ConfirmDialog';
+import { UnitPlanGallery } from './components/UnitPlanGallery';
+import { getUnitPlanImageUrls } from './utils/unitPlanImages';
+import { resolvePlotUnitType } from './utils/plotCornerDetection';
 import { LoadingIndicator, LoadingSpinner } from './components/ui/LoadingIndicator';
 import { useToast } from './components/ui/Toast';
 import { useMapStore, bootstrapPublicMap } from './store/mapStore';
@@ -127,8 +130,14 @@ function deriveCategoryConfigsFromMap(map: MapData): Record<'A' | 'B' | 'C', Cat
     if (catPlots.length === 0) continue
 
     const normal =
-      catPlots.find((p) => (p.meta as Record<string, unknown>).unitType !== 'ركن') ?? catPlots[0]
-    const corner = catPlots.find((p) => (p.meta as Record<string, unknown>).unitType === 'ركن')
+      catPlots.find((p) => {
+        const block = map.blocks.find((b) => b.id === p.blockId)
+        return resolvePlotUnitType(p, block) !== 'ركن'
+      }) ?? catPlots[0]
+    const corner = catPlots.find((p) => {
+      const block = map.blocks.find((b) => b.id === p.blockId)
+      return resolvePlotUnitType(p, block) === 'ركن'
+    })
 
     const nm = normal?.meta as Record<string, unknown> | undefined
     if (nm) {
@@ -1587,6 +1596,11 @@ export default function App() {
                   </div>
                 )}
               </div>
+
+              {(() => {
+                const planImages = getUnitPlanImageUrls(selectedUnit.category, selectedUnit.unitType);
+                return planImages ? <UnitPlanGallery images={planImages} /> : null;
+              })()}
 
               {isAdmin && selectedUnit.status === UnitStatus.AVAILABLE ? (
                 <div className="space-y-4">

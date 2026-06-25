@@ -4,6 +4,7 @@ import type { Block, Unit } from '../types'
 import { UnitStatus } from '../types'
 import { polygonBounds } from './geometry'
 import { toolbarGridDimensions } from './blockToolbarGrid'
+import { resolvePlotUnitType } from './plotCornerDetection'
 
 type CategoryPricingConfig = {
   basePrice: number
@@ -48,7 +49,7 @@ export function enrichMapDataFromCategoryConfigs(
       if (!cat || !configs[cat]) return plot
 
       const meta = { ...(plot.meta ?? {}) } as Record<string, unknown>
-      const isCorner = meta.unitType === 'ركن'
+      const isCorner = resolvePlotUnitType(plot, mapBlock) === 'ركن'
       const defaults = categoryDefaults(configs[cat], isCorner)
       const price = parseMetaNum(meta.price)
       const employeePrice = parseMetaNum(meta.employeePrice)
@@ -82,7 +83,7 @@ export function applyCategoryConfigsToMap(
       if (!cat || !configs[cat]) return plot
 
       const meta = { ...(plot.meta ?? {}) } as Record<string, unknown>
-      const isCorner = meta.unitType === 'ركن'
+      const isCorner = resolvePlotUnitType(plot, mapBlock) === 'ركن'
       const defaults = categoryDefaults(configs[cat], isCorner)
 
       return {
@@ -178,7 +179,7 @@ export function plotToLegacyUnit(plot: Plot, map: MapData, mapBlock: MapBlock | 
     price: typeof meta.price === 'number' ? meta.price : undefined,
     employeePrice: typeof meta.employeePrice === 'number' ? meta.employeePrice : undefined,
     area: typeof meta.area === 'number' ? meta.area : undefined,
-    unitType: meta.unitType === 'ركن' ? 'ركن' : 'عادي',
+    unitType: resolvePlotUnitType(plot, mapBlock),
     category,
     customerName: typeof meta.customerName === 'string' ? meta.customerName : undefined,
     note: typeof meta.note === 'string' ? meta.note : undefined,
